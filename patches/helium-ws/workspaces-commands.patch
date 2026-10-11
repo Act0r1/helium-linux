@@ -1,0 +1,533 @@
+diff --git a/chrome/app/chrome_command_ids.h b/chrome/app/chrome_command_ids.h
+index e5ffd47e4..bfaac862a 100644
+--- a/chrome/app/chrome_command_ids.h
++++ b/chrome/app/chrome_command_ids.h
+@@ -133,6 +133,21 @@
+ #define IDC_ADD_NEW_TAB_RECENT_GROUP  34107
+ #define IDC_UNFOCUS_TAB_GROUP         34108
+ 
++// Workspace commands. IDC_ACTIVATE_WORKSPACE_N activates workspace index N
++// (Ctrl+Alt+1 activates workspace 0). There is no "last workspace" command.
++#define IDC_ACTIVATE_NEXT_WORKSPACE     34110
++#define IDC_ACTIVATE_PREVIOUS_WORKSPACE 34111
++#define IDC_ACTIVATE_WORKSPACE_0        34112
++#define IDC_ACTIVATE_WORKSPACE_1        34113
++#define IDC_ACTIVATE_WORKSPACE_2        34114
++#define IDC_ACTIVATE_WORKSPACE_3        34115
++#define IDC_ACTIVATE_WORKSPACE_4        34116
++#define IDC_ACTIVATE_WORKSPACE_5        34117
++#define IDC_ACTIVATE_WORKSPACE_6        34118
++#define IDC_ACTIVATE_WORKSPACE_7        34119
++#define IDC_ACTIVATE_WORKSPACE_8        34120
++#define IDC_NEW_WORKSPACE               34121
++
+ // Page-related commands
+ #define IDC_BOOKMARK_THIS_TAB           35000
+ #define IDC_BOOKMARK_ALL_TABS           35001
+diff --git a/chrome/app/chrome_dll.rc b/chrome/app/chrome_dll.rc
+index 52a663e92..b91c572e4 100644
+--- a/chrome/app/chrome_dll.rc
++++ b/chrome/app/chrome_dll.rc
+@@ -131,6 +131,18 @@ BEGIN
+     VK_ADD,         IDC_ZOOM_PLUS,              VIRTKEY, CONTROL
+     VK_OEM_PLUS,    IDC_ZOOM_PLUS,              VIRTKEY, CONTROL
+     VK_OEM_PLUS,    IDC_ZOOM_PLUS,              VIRTKEY, CONTROL, SHIFT
++    VK_RIGHT,       IDC_ACTIVATE_NEXT_WORKSPACE,        VIRTKEY, SHIFT, ALT
++    VK_LEFT,        IDC_ACTIVATE_PREVIOUS_WORKSPACE,    VIRTKEY, SHIFT, ALT
++    "1",            IDC_ACTIVATE_WORKSPACE_0,           VIRTKEY, SHIFT, ALT
++    "2",            IDC_ACTIVATE_WORKSPACE_1,           VIRTKEY, SHIFT, ALT
++    "3",            IDC_ACTIVATE_WORKSPACE_2,           VIRTKEY, SHIFT, ALT
++    "4",            IDC_ACTIVATE_WORKSPACE_3,           VIRTKEY, SHIFT, ALT
++    "5",            IDC_ACTIVATE_WORKSPACE_4,           VIRTKEY, SHIFT, ALT
++    "6",            IDC_ACTIVATE_WORKSPACE_5,           VIRTKEY, SHIFT, ALT
++    "7",            IDC_ACTIVATE_WORKSPACE_6,           VIRTKEY, SHIFT, ALT
++    "8",            IDC_ACTIVATE_WORKSPACE_7,           VIRTKEY, SHIFT, ALT
++    "9",            IDC_ACTIVATE_WORKSPACE_8,           VIRTKEY, SHIFT, ALT
++    "G",            IDC_NEW_WORKSPACE,                  VIRTKEY, SHIFT, ALT
+ END
+ 
+ #ifdef APSTUDIO_INVOKED
+diff --git a/chrome/browser/global_keyboard_shortcuts_mac.mm b/chrome/browser/global_keyboard_shortcuts_mac.mm
+index b5c6696a3..0fcdd1d58 100644
+--- a/chrome/browser/global_keyboard_shortcuts_mac.mm
++++ b/chrome/browser/global_keyboard_shortcuts_mac.mm
+@@ -170,6 +170,33 @@ const std::vector<KeyboardShortcutData>& GetShortcutsNotPresentInMainMenu() {
+     keys.push_back(
+         {true, false, true, false, kVK_ANSI_Z, IDC_FOCUS_PREV_TAB_GROUP});
+ 
++    // Workspaces. Ctrl+Option matches Linux Ctrl+Alt. AppendShortcutData marks
++    // every shortcut from this list as not user-modifiable.
++    keys.push_back(
++        {false, false, true, true, kVK_RightArrow, IDC_ACTIVATE_NEXT_WORKSPACE});
++    keys.push_back({false, false, true, true, kVK_LeftArrow,
++                    IDC_ACTIVATE_PREVIOUS_WORKSPACE});
++    keys.push_back(
++        {false, false, true, true, kVK_ANSI_1, IDC_ACTIVATE_WORKSPACE_0});
++    keys.push_back(
++        {false, false, true, true, kVK_ANSI_2, IDC_ACTIVATE_WORKSPACE_1});
++    keys.push_back(
++        {false, false, true, true, kVK_ANSI_3, IDC_ACTIVATE_WORKSPACE_2});
++    keys.push_back(
++        {false, false, true, true, kVK_ANSI_4, IDC_ACTIVATE_WORKSPACE_3});
++    keys.push_back(
++        {false, false, true, true, kVK_ANSI_5, IDC_ACTIVATE_WORKSPACE_4});
++    keys.push_back(
++        {false, false, true, true, kVK_ANSI_6, IDC_ACTIVATE_WORKSPACE_5});
++    keys.push_back(
++        {false, false, true, true, kVK_ANSI_7, IDC_ACTIVATE_WORKSPACE_6});
++    keys.push_back(
++        {false, false, true, true, kVK_ANSI_8, IDC_ACTIVATE_WORKSPACE_7});
++    keys.push_back(
++        {false, false, true, true, kVK_ANSI_9, IDC_ACTIVATE_WORKSPACE_8});
++    keys.push_back(
++        {false, false, true, true, kVK_ANSI_N, IDC_NEW_WORKSPACE});
++
+     if (base::FeatureList::IsEnabled(features::kUIDebugTools)) {
+       keys.push_back(
+           {false, true, true, true, kVK_ANSI_T, IDC_DEBUG_TOGGLE_TABLET_MODE});
+diff --git a/chrome/browser/ui/accelerator_table.cc b/chrome/browser/ui/accelerator_table.cc
+index fd591a4e0..19e31fc6b 100644
+--- a/chrome/browser/ui/accelerator_table.cc
++++ b/chrome/browser/ui/accelerator_table.cc
+@@ -261,6 +261,74 @@ const AcceleratorMapping kAcceleratorMap[] = {
+      IDC_ZOOM_MINUS},
+     {ui::VKEY_OEM_PLUS, ui::EF_SHIFT_DOWN | ui::EF_CONTROL_DOWN, IDC_ZOOM_PLUS},
+ #endif  // !BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(IS_WIN)
++    // Ctrl+Alt is reserved by Windows. Alt+Shift+W closes a tab group and
++    // Alt+Shift+N opens a split tab, so the new-workspace key is Alt+Shift+G.
++    {ui::VKEY_RIGHT, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_NEXT_WORKSPACE},
++    {ui::VKEY_LEFT, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_PREVIOUS_WORKSPACE},
++    {ui::VKEY_1, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_ACTIVATE_WORKSPACE_0},
++    {ui::VKEY_2, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_ACTIVATE_WORKSPACE_1},
++    {ui::VKEY_3, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_ACTIVATE_WORKSPACE_2},
++    {ui::VKEY_4, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_ACTIVATE_WORKSPACE_3},
++    {ui::VKEY_5, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_ACTIVATE_WORKSPACE_4},
++    {ui::VKEY_6, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_ACTIVATE_WORKSPACE_5},
++    {ui::VKEY_7, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_ACTIVATE_WORKSPACE_6},
++    {ui::VKEY_8, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_ACTIVATE_WORKSPACE_7},
++    {ui::VKEY_9, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_ACTIVATE_WORKSPACE_8},
++    {ui::VKEY_G, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_NEW_WORKSPACE},
++#elif BUILDFLAG(IS_CHROMEOS)
++    // Ctrl+Alt+N is IDC_NEW_SPLIT_TAB on ChromeOS.
++    {ui::VKEY_RIGHT, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_NEXT_WORKSPACE},
++    {ui::VKEY_LEFT, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_PREVIOUS_WORKSPACE},
++    {ui::VKEY_1, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_0},
++    {ui::VKEY_2, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_1},
++    {ui::VKEY_3, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_2},
++    {ui::VKEY_4, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_3},
++    {ui::VKEY_5, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_4},
++    {ui::VKEY_6, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_5},
++    {ui::VKEY_7, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_6},
++    {ui::VKEY_8, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_7},
++    {ui::VKEY_9, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_8},
++    {ui::VKEY_N, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN | ui::EF_SHIFT_DOWN,
++     IDC_NEW_WORKSPACE},
++#else
++    {ui::VKEY_RIGHT, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_NEXT_WORKSPACE},
++    {ui::VKEY_LEFT, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_PREVIOUS_WORKSPACE},
++    {ui::VKEY_1, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_0},
++    {ui::VKEY_2, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_1},
++    {ui::VKEY_3, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_2},
++    {ui::VKEY_4, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_3},
++    {ui::VKEY_5, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_4},
++    {ui::VKEY_6, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_5},
++    {ui::VKEY_7, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_6},
++    {ui::VKEY_8, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_7},
++    {ui::VKEY_9, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_ACTIVATE_WORKSPACE_8},
++    {ui::VKEY_N, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN, IDC_NEW_WORKSPACE},
++#endif
+ #endif  // !BUILDFLAG(IS_MAC)
+ };
+ 
+@@ -305,7 +373,8 @@ const int kRepeatableCommandIds[] = {
+     IDC_FIND_NEXT,           IDC_FIND_PREVIOUS,       IDC_FOCUS_NEXT_PANE,
+     IDC_FOCUS_PREVIOUS_PANE, IDC_MOVE_TAB_NEXT,       IDC_MOVE_TAB_PREVIOUS,
+     IDC_SELECT_NEXT_TAB,     IDC_SELECT_PREVIOUS_TAB, IDC_CYCLE_TO_NEXT_TAB,
+-    IDC_CYCLE_TO_PREV_TAB,
++    IDC_CYCLE_TO_PREV_TAB,   IDC_ACTIVATE_NEXT_WORKSPACE,
++    IDC_ACTIVATE_PREVIOUS_WORKSPACE,
+ };
+ 
+ std::vector<AcceleratorMapping>* GetAcceleratorsPointer() {
+diff --git a/chrome/browser/ui/actions/chrome_action_id.h b/chrome/browser/ui/actions/chrome_action_id.h
+index 62ba0f24c..5ba568ee9 100644
+--- a/chrome/browser/ui/actions/chrome_action_id.h
++++ b/chrome/browser/ui/actions/chrome_action_id.h
+@@ -451,6 +451,18 @@
+   E(kActionOmniboxEverywhereStatusIconMenuExit, \
+     IDC_OMNIBOX_EVERYWHERE_STATUS_ICON_MENU_EXIT) \
+   E(kActionShowPaymentsChurnedUsersBubble) \
++  E(kActionActivateNextWorkspace, IDC_ACTIVATE_NEXT_WORKSPACE) \
++  E(kActionActivatePreviousWorkspace, IDC_ACTIVATE_PREVIOUS_WORKSPACE) \
++  E(kActionActivateWorkspace0, IDC_ACTIVATE_WORKSPACE_0) \
++  E(kActionActivateWorkspace1, IDC_ACTIVATE_WORKSPACE_1) \
++  E(kActionActivateWorkspace2, IDC_ACTIVATE_WORKSPACE_2) \
++  E(kActionActivateWorkspace3, IDC_ACTIVATE_WORKSPACE_3) \
++  E(kActionActivateWorkspace4, IDC_ACTIVATE_WORKSPACE_4) \
++  E(kActionActivateWorkspace5, IDC_ACTIVATE_WORKSPACE_5) \
++  E(kActionActivateWorkspace6, IDC_ACTIVATE_WORKSPACE_6) \
++  E(kActionActivateWorkspace7, IDC_ACTIVATE_WORKSPACE_7) \
++  E(kActionActivateWorkspace8, IDC_ACTIVATE_WORKSPACE_8) \
++  E(kActionNewWorkspace, IDC_NEW_WORKSPACE) \
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+ #define CHROME_PLATFORM_SPECIFIC_ACTION_IDS \
+diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
+index 194dae8fb..da27efe80 100644
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -20,6 +20,7 @@
+ #include "base/metrics/user_metrics.h"
+ #include "base/notimplemented.h"
+ #include "base/strings/strcat.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "base/time/time.h"
+ #include "build/branding_buildflags.h"
+ #include "build/build_config.h"
+@@ -103,6 +104,7 @@
+ #include "chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_section.h"
+ #include "chrome/browser/ui/webui/util/webui_util_desktop.h"
+ #include "chrome/browser/ui/window_feature_controller/window_feature_controller.h"
++#include "chrome/browser/ui/workspaces/workspace_controller.h"
+ #include "chrome/browser/web_applications/web_app_install_params.h"
+ #include "chrome/browser/web_applications/web_app_utils.h"
+ #include "chrome/common/channel_info.h"
+@@ -445,6 +447,12 @@ BrowserCommandController::BrowserCommandController(BrowserWindowInterface* bwi)
+   }
+ 
+   InitCommandState();
++  // WorkspaceController is created later in BrowserWindowFeatures::Init.
++  // Register the commands now, then refresh once that Init has returned.
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&BrowserCommandController::UpdateWorkspaceCommands,
++                     weak_ptr_factory_.GetWeakPtr()));
+ 
+   // Bookmark editing commands depend on the bookmark model to be loaded.
+   // Schedule a callback to update them once the model is loaded instead of just
+@@ -555,7 +563,19 @@ bool BrowserCommandController::IsReservedCommandOrKey(
+          command_id == IDC_SELECT_NEXT_TAB ||
+          command_id == IDC_SELECT_PREVIOUS_TAB ||
+          command_id == IDC_CYCLE_TO_NEXT_TAB ||
+-         command_id == IDC_CYCLE_TO_PREV_TAB || command_id == IDC_EXIT ||
++         command_id == IDC_CYCLE_TO_PREV_TAB ||
++         command_id == IDC_ACTIVATE_NEXT_WORKSPACE ||
++         command_id == IDC_ACTIVATE_PREVIOUS_WORKSPACE ||
++         command_id == IDC_ACTIVATE_WORKSPACE_0 ||
++         command_id == IDC_ACTIVATE_WORKSPACE_1 ||
++         command_id == IDC_ACTIVATE_WORKSPACE_2 ||
++         command_id == IDC_ACTIVATE_WORKSPACE_3 ||
++         command_id == IDC_ACTIVATE_WORKSPACE_4 ||
++         command_id == IDC_ACTIVATE_WORKSPACE_5 ||
++         command_id == IDC_ACTIVATE_WORKSPACE_6 ||
++         command_id == IDC_ACTIVATE_WORKSPACE_7 ||
++         command_id == IDC_ACTIVATE_WORKSPACE_8 ||
++         command_id == IDC_NEW_WORKSPACE || command_id == IDC_EXIT ||
+          command_id == IDC_COPY_OR_INSPECT_SHORTCUT || command_id == IDC_DEV_TOOLS ||
+          command_id == IDC_DEV_TOOLS_TOGGLE || command_id == IDC_TAB_SEARCH;
+ }
+@@ -853,6 +873,26 @@ void BrowserCommandController::HandleCommandWithDisposition(
+           TabStripUserGestureDetails(
+               TabStripUserGestureDetails::GestureType::kKeyboard, time_stamp));
+       break;
++    case IDC_ACTIVATE_NEXT_WORKSPACE:
++      ActivateNextWorkspace(browser_);
++      break;
++    case IDC_ACTIVATE_PREVIOUS_WORKSPACE:
++      ActivatePreviousWorkspace(browser_);
++      break;
++    case IDC_ACTIVATE_WORKSPACE_0:
++    case IDC_ACTIVATE_WORKSPACE_1:
++    case IDC_ACTIVATE_WORKSPACE_2:
++    case IDC_ACTIVATE_WORKSPACE_3:
++    case IDC_ACTIVATE_WORKSPACE_4:
++    case IDC_ACTIVATE_WORKSPACE_5:
++    case IDC_ACTIVATE_WORKSPACE_6:
++    case IDC_ACTIVATE_WORKSPACE_7:
++    case IDC_ACTIVATE_WORKSPACE_8:
++      ActivateWorkspaceAt(browser_, id - IDC_ACTIVATE_WORKSPACE_0);
++      break;
++    case IDC_NEW_WORKSPACE:
++      CreateWorkspace(browser_);
++      break;
+     case IDC_DUPLICATE_TAB:
+       DuplicateTab(browser_);
+       break;
+@@ -2070,6 +2110,7 @@ void BrowserCommandController::InitCommandState() {
+   command_updater_->UpdateCommandEnabled(IDC_SELECT_TAB_7, supports_tabs);
+   command_updater_->UpdateCommandEnabled(IDC_SELECT_LAST_TAB, supports_tabs);
+   command_updater_->UpdateCommandEnabled(IDC_NEW_TAB_TO_RIGHT, supports_tabs);
++  UpdateWorkspaceCommands();
+   command_updater_->UpdateCommandEnabled(IDC_TAB_SCROLL_BUTTONS_TOGGLE_PIN,
+                                          supports_tabs);
+ 
+@@ -2861,10 +2902,30 @@ void BrowserCommandController::UpdateCommandsForTabStripStateChanged() {
+       browser_->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL);
+   command_updater_->UpdateCommandEnabled(IDC_GROUP_UNGROUPED_TABS,
+                                          CanGroupAllUngroupedTabs(browser_));
++  UpdateWorkspaceCommands();
+ 
+   UpdateCommandsForBookmarkEditing();
+ }
+ 
++void BrowserCommandController::UpdateWorkspaceCommands() {
++  if (IsInLockedFullscreenMode(/*allow_ontask=*/false)) {
++    return;
++  }
++  const bool enabled =
++      workspaces::WorkspaceController::From(browser_) != nullptr;
++  constexpr int kCommands[] = {
++      IDC_ACTIVATE_NEXT_WORKSPACE, IDC_ACTIVATE_PREVIOUS_WORKSPACE,
++      IDC_ACTIVATE_WORKSPACE_0,    IDC_ACTIVATE_WORKSPACE_1,
++      IDC_ACTIVATE_WORKSPACE_2,    IDC_ACTIVATE_WORKSPACE_3,
++      IDC_ACTIVATE_WORKSPACE_4,    IDC_ACTIVATE_WORKSPACE_5,
++      IDC_ACTIVATE_WORKSPACE_6,    IDC_ACTIVATE_WORKSPACE_7,
++      IDC_ACTIVATE_WORKSPACE_8,    IDC_NEW_WORKSPACE,
++  };
++  for (int command_id : kCommands) {
++    command_updater_->UpdateCommandEnabled(command_id, enabled);
++  }
++}
++
+ void BrowserCommandController::UpdateCommandsForEnableGlicChanged() {
+   if (IsInLockedFullscreenMode(/*allow_ontask=*/false)) {
+     return;
+diff --git a/chrome/browser/ui/browser_command_controller.h b/chrome/browser/ui/browser_command_controller.h
+index dbb376235..1a7f7943b 100644
+--- a/chrome/browser/ui/browser_command_controller.h
++++ b/chrome/browser/ui/browser_command_controller.h
+@@ -260,6 +260,9 @@ class BrowserCommandController : public CommandUpdater,
+   // Updates commands that depend on the state of the tab strip model.
+   void UpdateCommandsForTabStripStateChanged();
+ 
++  // Enabled iff WorkspaceController::From(browser_) is non-null.
++  void UpdateWorkspaceCommands();
++
+   // Updates commands that depend on the enabled state of glic.
+   void UpdateCommandsForEnableGlicChanged();
+ 
+diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_commands.cc
+index f3e2cd639..4e09a9fed 100644
+--- a/chrome/browser/ui/browser_commands.cc
++++ b/chrome/browser/ui/browser_commands.cc
+@@ -16,6 +16,7 @@
+ #include "base/check_deref.h"
+ #include "base/command_line.h"
+ #include "base/containers/adapters.h"
++#include "base/containers/contains.h"
+ #include "base/feature_list.h"
+ #include "base/i18n/rtl.h"
+ #include "base/memory/scoped_refptr.h"
+@@ -128,6 +129,7 @@
+ #include "chrome/browser/ui/web_applications/web_app_tabbed_utils.h"
+ #include "chrome/browser/ui/webui/tab_search/tab_search.mojom.h"
+ #include "chrome/browser/ui/window_feature_controller/window_feature_controller.h"
++#include "chrome/browser/ui/workspaces/workspace_controller.h"
+ #include "chrome/browser/upgrade_detector/upgrade_detector.h"
+ #include "chrome/browser/web_applications/web_app_constants.h"
+ #include "chrome/browser/web_applications/web_app_helpers.h"
+@@ -538,6 +540,24 @@ struct MruTabResult {
+   int index;
+ };
+ 
++std::optional<std::vector<int>> VisibleTabIndices(
++    BrowserWindowInterface* browser) {
++  workspaces::WorkspaceController* controller =
++      workspaces::WorkspaceController::From(browser);
++  if (!controller) {
++    return std::nullopt;
++  }
++  TabStripModel* model = browser->GetTabStripModel();
++  std::vector<int> indices;
++  for (tabs::TabInterface* tab : controller->GetVisibleTabs()) {
++    const int index = model->GetIndexOfTab(tab);
++    if (index != TabStripModel::kNoTab) {
++      indices.push_back(index);
++    }
++  }
++  return indices;
++}
++
+ std::optional<MruTabResult> GetGlobalMruTab(
+     BrowserCollection* collection,
+     BrowserWindowInterface* active_browser) {
+@@ -548,11 +568,20 @@ std::optional<MruTabResult> GetGlobalMruTab(
+   collection->ForEach(
+       [&](BrowserWindowInterface* b) {
+         TabStripModel* model = b->GetTabStripModel();
++        workspaces::WorkspaceController* controller =
++            workspaces::WorkspaceController::From(b);
++        std::vector<tabs::TabInterface*> visible_tabs;
++        if (controller) {
++          visible_tabs = controller->GetVisibleTabs();
++        }
+         int i = 0;
+         for (auto it = model->begin(); it != model->end(); ++it, ++i) {
+           if (b == active_browser && i == model->active_index()) {
+             continue;
+           }
++          if (controller && !base::Contains(visible_tabs, *it)) {
++            continue;
++          }
+           content::WebContents* contents = (*it)->GetContents();
+           auto* lifecycle_unit =
+               resource_coordinator::TabLifecycleUnitExternal::FromWebContents(
+@@ -1565,13 +1594,23 @@ bool CanResetZoom(content::WebContents* contents) {
+ void SelectNextTab(BrowserWindowInterface* browser,
+                    TabStripUserGestureDetails gesture_detail) {
+   base::RecordAction(UserMetricsAction("SelectNextTab"));
+-  browser->GetTabStripModel()->SelectNextTab(gesture_detail);
++  TabStripModel* model = browser->GetTabStripModel();
++  if (std::optional<std::vector<int>> indices = VisibleTabIndices(browser)) {
++    model->SelectNextTabAmong(*indices, gesture_detail);
++  } else {
++    model->SelectNextTab(gesture_detail);
++  }
+ }
+ 
+ void SelectPreviousTab(BrowserWindowInterface* browser,
+                        TabStripUserGestureDetails gesture_detail) {
+   base::RecordAction(UserMetricsAction("SelectPrevTab"));
+-  browser->GetTabStripModel()->SelectPreviousTab(gesture_detail);
++  TabStripModel* model = browser->GetTabStripModel();
++  if (std::optional<std::vector<int>> indices = VisibleTabIndices(browser)) {
++    model->SelectPreviousTabAmong(*indices, gesture_detail);
++  } else {
++    model->SelectPreviousTab(gesture_detail);
++  }
+ }
+ 
+ bool IsCtrlTabMruEnabled(BrowserWindowInterface* browser) {
+@@ -1608,8 +1647,13 @@ void SelectNumberedTab(BrowserWindowInterface* browser,
+   TabStripModel* model = browser->GetTabStripModel();
+   std::optional<tab_groups::TabGroupId> focused_group =
+       model->GetFocusedGroup();
++  workspaces::WorkspaceController* controller =
++      workspaces::WorkspaceController::From(browser);
+   int visible_count = 0;
+   for (tabs::TabInterface* tab : *model) {
++    if (controller && !controller->IsTabVisible(tab)) {
++      continue;
++    }
+     if (!IsTabSelectable(model, tab, focused_group)) {
+       continue;
+     }
+@@ -1628,7 +1672,12 @@ void SelectLastTab(BrowserWindowInterface* browser,
+   TabStripModel* model = browser->GetTabStripModel();
+   std::optional<tab_groups::TabGroupId> focused_group =
+       model->GetFocusedGroup();
++  workspaces::WorkspaceController* controller =
++      workspaces::WorkspaceController::From(browser);
+   for (tabs::TabInterface* tab : base::Reversed(*model)) {
++    if (controller && !controller->IsTabVisible(tab)) {
++      continue;
++    }
+     if (!IsTabSelectable(model, tab, focused_group)) {
+       continue;
+     }
+@@ -1639,6 +1688,30 @@ void SelectLastTab(BrowserWindowInterface* browser,
+   }
+ }
+ 
++void ActivateNextWorkspace(BrowserWindowInterface* browser) {
++  if (auto* controller = workspaces::WorkspaceController::From(browser)) {
++    controller->ActivateNextWorkspace();
++  }
++}
++
++void ActivatePreviousWorkspace(BrowserWindowInterface* browser) {
++  if (auto* controller = workspaces::WorkspaceController::From(browser)) {
++    controller->ActivatePreviousWorkspace();
++  }
++}
++
++void ActivateWorkspaceAt(BrowserWindowInterface* browser, int index) {
++  if (auto* controller = workspaces::WorkspaceController::From(browser)) {
++    controller->ActivateWorkspaceAt(index);
++  }
++}
++
++void CreateWorkspace(BrowserWindowInterface* browser) {
++  if (auto* controller = workspaces::WorkspaceController::From(browser)) {
++    controller->CreateWorkspace();
++  }
++}
++
+ void DuplicateTab(BrowserWindowInterface* browser) {
+   base::RecordAction(UserMetricsAction("Duplicate"));
+   DuplicateTabAt(browser, browser->GetTabStripModel()->active_index());
+diff --git a/chrome/browser/ui/browser_commands.h b/chrome/browser/ui/browser_commands.h
+index 133d3eeeb..5ac696b68 100644
+--- a/chrome/browser/ui/browser_commands.h
++++ b/chrome/browser/ui/browser_commands.h
+@@ -160,6 +160,10 @@ void SelectLastTab(
+     BrowserWindowInterface* browser,
+     TabStripUserGestureDetails gesture_detail = TabStripUserGestureDetails(
+         TabStripUserGestureDetails::GestureType::kOther));
++void ActivateNextWorkspace(BrowserWindowInterface* browser);
++void ActivatePreviousWorkspace(BrowserWindowInterface* browser);
++void ActivateWorkspaceAt(BrowserWindowInterface* browser, int index);
++void CreateWorkspace(BrowserWindowInterface* browser);
+ void DuplicateTab(BrowserWindowInterface* browser);
+ bool CanDuplicateTab(const BrowserWindowInterface* browser);
+ bool CanDuplicateKeyboardFocusedTab(const BrowserWindowInterface* browser);
+diff --git a/chrome/browser/ui/browser_shortcuts/browser_shortcut_metadata.cc b/chrome/browser/ui/browser_shortcuts/browser_shortcut_metadata.cc
+index a45e19021..3015625fe 100644
+--- a/chrome/browser/ui/browser_shortcuts/browser_shortcut_metadata.cc
++++ b/chrome/browser/ui/browser_shortcuts/browser_shortcut_metadata.cc
+@@ -154,6 +154,30 @@ std::optional<BrowserShortcutCommandLabel> GetBrowserShortcutCommandLabel(
+       return Label(IDS_SHORTCUT_COMMAND_SELECT_TAB, u"7");
+     case IDC_SELECT_TAB_7:
+       return Label(IDS_SHORTCUT_COMMAND_SELECT_TAB, u"8");
++    case IDC_ACTIVATE_NEXT_WORKSPACE:
++      return Label(IDS_SHORTCUT_COMMAND_NEXT_WORKSPACE);
++    case IDC_ACTIVATE_PREVIOUS_WORKSPACE:
++      return Label(IDS_SHORTCUT_COMMAND_PREVIOUS_WORKSPACE);
++    case IDC_ACTIVATE_WORKSPACE_0:
++      return Label(IDS_SHORTCUT_COMMAND_ACTIVATE_WORKSPACE, u"1");
++    case IDC_ACTIVATE_WORKSPACE_1:
++      return Label(IDS_SHORTCUT_COMMAND_ACTIVATE_WORKSPACE, u"2");
++    case IDC_ACTIVATE_WORKSPACE_2:
++      return Label(IDS_SHORTCUT_COMMAND_ACTIVATE_WORKSPACE, u"3");
++    case IDC_ACTIVATE_WORKSPACE_3:
++      return Label(IDS_SHORTCUT_COMMAND_ACTIVATE_WORKSPACE, u"4");
++    case IDC_ACTIVATE_WORKSPACE_4:
++      return Label(IDS_SHORTCUT_COMMAND_ACTIVATE_WORKSPACE, u"5");
++    case IDC_ACTIVATE_WORKSPACE_5:
++      return Label(IDS_SHORTCUT_COMMAND_ACTIVATE_WORKSPACE, u"6");
++    case IDC_ACTIVATE_WORKSPACE_6:
++      return Label(IDS_SHORTCUT_COMMAND_ACTIVATE_WORKSPACE, u"7");
++    case IDC_ACTIVATE_WORKSPACE_7:
++      return Label(IDS_SHORTCUT_COMMAND_ACTIVATE_WORKSPACE, u"8");
++    case IDC_ACTIVATE_WORKSPACE_8:
++      return Label(IDS_SHORTCUT_COMMAND_ACTIVATE_WORKSPACE, u"9");
++    case IDC_NEW_WORKSPACE:
++      return Label(IDS_SHORTCUT_COMMAND_NEW_WORKSPACE);
+     case IDC_MOVE_TAB_NEXT:
+       return Label(IDS_SHORTCUT_COMMAND_MOVE_TAB_NEXT);
+     case IDC_MOVE_TAB_PREVIOUS:

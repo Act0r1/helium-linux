@@ -1,0 +1,514 @@
+diff --git a/chrome/browser/ui/views/tabs/common/tab_strip_view.cc b/chrome/browser/ui/views/tabs/common/tab_strip_view.cc
+index e48e2d5bd..ef6119095 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_strip_view.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_strip_view.cc
+@@ -228,6 +228,14 @@ TabStripView::TabStripView(TabCollectionNode* collection_node)
+     }
+   }
+ 
++  if (IsVerticalOrientation(collection_node_)) {
++    auto* browser =
++        collection_node_->GetController()->GetBrowserView()->browser();
++    if (auto* controller = workspaces::WorkspaceController::From(browser)) {
++      workspace_observation_.Observe(controller);
++    }
++  }
++
+   SetNotifyEnterExitOnChild(true);
+   UpdateColors();
+ }
+@@ -239,6 +247,7 @@ TabStripView::~TabStripView() {
+ }
+ 
+ void TabStripView::AddedToWidget() {
++  UpdateWorkspaceVisibility();
+   views::Widget* const widget = GetWidget();
+   paint_as_active_subscription_ = widget->RegisterPaintAsActiveChangedCallback(
+       base::BindRepeating(&TabStripView::UpdateColors, base::Unretained(this)));
+@@ -327,6 +336,7 @@ void TabStripView::OnChildMoved(TabCollectionNode* moved_node) {
+ }
+ 
+ void TabStripView::OnTabChanged(const tabs::TabInterface* active_tab) {
++  UpdateWorkspaceVisibility();
+   if (!collection_node_ || !active_tab) {
+     return;
+   }
+@@ -611,6 +621,7 @@ void TabStripView::SetScrollViewProperties(views::ScrollView* scroll_view) {
+ }
+ 
+ void TabStripView::ResetCollectionNode() {
++  workspace_observation_.Reset();
+   collection_node_ = nullptr;
+   if (tab_scroll_button_container_) {
+     tab_scroll_button_container_->SetScrollView(nullptr);
+@@ -798,6 +809,41 @@ gfx::Rect TabStripView::GetBoundsInScrollViewContents(
+   return bounds;
+ }
+ 
++void TabStripView::OnWorkspacesChanged() {
++  UpdateWorkspaceVisibility();
++}
++
++void TabStripView::OnActiveWorkspaceChanged() {
++  UpdateWorkspaceVisibility();
++}
++
++void TabStripView::UpdateWorkspaceVisibility() {
++  if (!collection_node_ || !workspace_observation_.IsObserving()) {
++    return;
++  }
++  auto* unpinned =
++      collection_node_->GetChildNodeOfType(TabCollectionNode::Type::UNPINNED);
++  if (!unpinned) {
++    return;
++  }
++  auto* controller = workspace_observation_.GetSource();
++  auto* model = collection_node_->GetController()
++                    ->GetBrowserView()
++                    ->browser()
++                    ->GetTabStripModel();
++  TabCollectionNode* active_node = nullptr;
++  if (auto active = controller->GetActiveWorkspace();
++      active && model->group_model()->ContainsTabGroup(*active)) {
++    active_node = unpinned->GetNodeForHandle(
++        model->group_model()->GetTabGroup(*active)->GetCollectionHandle());
++  }
++  for (const auto& child : unpinned->children()) {
++    child->view()->SetVisible(child.get() == active_node);
++  }
++  unpinned->view()->InvalidateLayout();
++  InvalidateLayout();
++}
++
+ void TabStripView::UpdateColors() {}
+ 
+ bool TabStripView::IsFrameActive() const {
+diff --git a/chrome/browser/ui/views/tabs/common/tab_strip_view.h b/chrome/browser/ui/views/tabs/common/tab_strip_view.h
+index 1767160a0..6680ca19b 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_strip_view.h
++++ b/chrome/browser/ui/views/tabs/common/tab_strip_view.h
+@@ -7,6 +7,7 @@
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "base/scoped_observation.h"
++#include "chrome/browser/ui/workspaces/workspace_controller.h"
+ #include "components/prefs/pref_change_registrar.h"
+ #include "components/tabs/public/tab_interface.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
+@@ -34,7 +35,8 @@ class Separator;
+ // scrolling to the active tab view when the active tab changes.
+ // Layout is managed by `TabStripViewLayout`.
+ class TabStripView final : public views::View,
+-                           public views::WidgetObserver {
++                           public views::WidgetObserver,
++                           public workspaces::WorkspaceController::Observer {
+   METADATA_HEADER(TabStripView, views::View)
+ 
+  public:
+@@ -73,6 +75,8 @@ class TabStripView final : public views::View,
+ 
+   void OnChildMoved(TabCollectionNode* moved_node);
+   void OnTabChanged(const tabs::TabInterface* active_tab);
++  void OnWorkspacesChanged() override;
++  void OnActiveWorkspaceChanged() override;
+ 
+   // Scrolls the scroll view(s) to ensure that the specified target tabs/views
+   // are visible within the viewport.
+@@ -130,6 +134,7 @@ class TabStripView final : public views::View,
+                                           views::ScrollView* scroll_view);
+ 
+   void UpdateColors();
++  void UpdateWorkspaceVisibility();
+ 
+   bool IsFrameActive() const;
+ 
+@@ -171,6 +176,10 @@ class TabStripView final : public views::View,
+   base::CallbackListSubscription paint_as_active_subscription_;
+   std::vector<base::CallbackListSubscription> callback_subscriptions_;
+ 
++  base::ScopedObservation<workspaces::WorkspaceController,
++                          workspaces::WorkspaceController::Observer>
++      workspace_observation_{this};
++
+   base::ScopedObservation<views::Widget, views::WidgetObserver>
+       widget_observation_{this};
+ };
+diff --git a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
+index 01be335c0..3da8d7c13 100644
+--- a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
++++ b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
+@@ -10,6 +10,8 @@
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h"
+ #include "chrome/browser/ui/views/tabs/vertical/vertical_new_tab_button.h"
++#include "chrome/browser/ui/views/workspaces/workspace_switcher_view.h"
++#include "chrome/browser/ui/workspaces/workspace_controller.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
+ #include "ui/views/view_class_properties.h"
+ 
+@@ -35,6 +37,9 @@ VerticalTabStripBottomContainer::VerticalTabStripBottomContainer(
+           record_new_tab_button_pressed);
+ 
+   new_tab_button_ = AddChildView(std::move(new_tab_button));
++  if (workspaces::WorkspaceController::From(browser)) {
++    AddChildView(workspaces::CreateWorkspaceSwitcherView(browser));
++  }
+ 
+   OnCollapseStateChanged(state_controller->GetCollapseState());
+   collapsed_state_change_subscription_ =
+@@ -85,9 +90,8 @@ void VerticalTabStripBottomContainer::UpdateButtonStyles(bool collapsed) {
+                                : views::LayoutOrientation::kHorizontal;
+ 
+   // Setting button's layout based on collapsed state
+-  SetOrientation(orientation);
+-  SetCrossAxisAlignment(collapsed ? views::LayoutAlignment::kStretch
+-                                  : views::LayoutAlignment::kStart);
++  SetOrientation(views::LayoutOrientation::kVertical);
++  SetCrossAxisAlignment(views::LayoutAlignment::kStretch);
+ 
+   new_tab_button_->SetProperty(
+       views::kFlexBehaviorKey,
+diff --git a/chrome/browser/ui/views/workspaces/workspace_switcher_view.cc b/chrome/browser/ui/views/workspaces/workspace_switcher_view.cc
+new file mode 100644
+index 000000000..bbc84eaeb
+--- /dev/null
++++ b/chrome/browser/ui/views/workspaces/workspace_switcher_view.cc
+@@ -0,0 +1,311 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/views/workspaces/workspace_switcher_view.h"
++
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/i18n/break_iterator.h"
++#include "base/i18n/char_iterator.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/scoped_observation.h"
++#include "base/task/single_thread_task_runner.h"
++#include "build/build_config.h"
++#include "chrome/browser/ui/tabs/tab_group_model.h"
++#include "chrome/browser/ui/tabs/tab_group_theme.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
++#include "chrome/browser/ui/views/tabs/groups/tab_group_editor_bubble_tracker.h"
++#include "chrome/browser/ui/views/tabs/groups/tab_group_editor_bubble_view.h"
++#include "chrome/browser/ui/workspaces/workspace_controller.h"
++#include "chrome/grit/generated_resources.h"
++#include "components/tab_groups/tab_group_id.h"
++#include "components/tabs/public/tab_group.h"
++#include "third_party/icu/source/common/unicode/uchar.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "ui/accessibility/ax_enums.mojom.h"
++#include "ui/base/l10n/l10n_util.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/base/mojom/menu_source_type.mojom-shared.h"
++#include "ui/color/color_provider.h"
++#include "ui/gfx/geometry/insets.h"
++#include "ui/gfx/geometry/point.h"
++#include "ui/gfx/geometry/size.h"
++#include "ui/views/accessibility/view_accessibility.h"
++#include "ui/views/background.h"
++#include "ui/views/border.h"
++#include "ui/views/context_menu_controller.h"
++#include "ui/views/controls/button/label_button.h"
++#include "ui/views/controls/highlight_path_generator.h"
++#include "ui/views/layout/flex_layout_types.h"
++#include "ui/views/layout/flex_layout_view.h"
++#include "ui/views/view_class_properties.h"
++#include "ui/views/view_utils.h"
++
++namespace {
++
++constexpr int kChipSize = 28;
++constexpr SkAlpha kInactiveChipAlpha = 0x66;
++
++std::u16string LeadingEmoji(std::u16string_view title) {
++  if (title.empty()) {
++    return std::u16string();
++  }
++  base::i18n::BreakIterator graphemes(
++      title, base::i18n::BreakIterator::BREAK_CHARACTER);
++  if (!graphemes.Init() || !graphemes.Advance()) {
++    return std::u16string();
++  }
++  const std::u16string_view cluster = graphemes.GetString();
++  for (base::i18n::UTF16CharIterator iter(cluster); !iter.end();
++       iter.Advance()) {
++    const UChar32 codepoint = iter.get();
++    if (u_hasBinaryProperty(codepoint, UCHAR_EMOJI_PRESENTATION) ||
++        u_hasBinaryProperty(codepoint, UCHAR_EXTENDED_PICTOGRAPHIC) ||
++        u_hasBinaryProperty(codepoint, UCHAR_REGIONAL_INDICATOR)) {
++      return std::u16string(cluster);
++    }
++  }
++  return std::u16string();
++}
++
++class WorkspaceChipButton : public views::LabelButton {
++  METADATA_HEADER(WorkspaceChipButton, views::LabelButton)
++
++ public:
++  WorkspaceChipButton(PressedCallback callback,
++                      std::u16string_view text,
++                      tab_groups::TabGroupId group_id)
++      : LabelButton(std::move(callback), text), group_id_(group_id) {}
++  WorkspaceChipButton(const WorkspaceChipButton&) = delete;
++  WorkspaceChipButton& operator=(const WorkspaceChipButton&) = delete;
++  ~WorkspaceChipButton() override = default;
++
++  tab_groups::TabGroupId group_id() const { return group_id_; }
++
++ private:
++  const tab_groups::TabGroupId group_id_;
++};
++
++BEGIN_METADATA(WorkspaceChipButton)
++END_METADATA
++
++class WorkspaceSwitcherView : public views::FlexLayoutView,
++                              public workspaces::WorkspaceController::Observer,
++                              public TabStripModelObserver,
++                              public views::ContextMenuController {
++  METADATA_HEADER(WorkspaceSwitcherView, views::FlexLayoutView)
++
++ public:
++  explicit WorkspaceSwitcherView(BrowserWindowInterface* browser)
++      : browser_(browser),
++        editor_bubble_tracker_(
++            browser ? tabs::VerticalTabStripStateController::From(browser)
++                    : nullptr) {
++    SetOrientation(views::LayoutOrientation::kHorizontal);
++    SetCrossAxisAlignment(views::LayoutAlignment::kCenter);
++    SetMainAxisAlignment(views::LayoutAlignment::kStart);
++    SetInteriorMargin(gfx::Insets::VH(4, 0));
++    SetDefault(views::kMarginsKey, gfx::Insets::VH(0, 2));
++    SetProperty(views::kFlexBehaviorKey,
++                views::FlexSpecification(
++                    views::MinimumFlexSizeRule::kPreferred,
++                    views::MaximumFlexSizeRule::kPreferred));
++    GetViewAccessibility().SetRole(ax::mojom::Role::kToolbar);
++    GetViewAccessibility().SetName(
++        l10n_util::GetStringUTF16(IDS_WORKSPACE_SWITCHER_ACCNAME));
++
++    bubble_closed_subscription_ =
++        editor_bubble_tracker_.RegisterOnBubbleClosed(base::BindRepeating(
++            &WorkspaceSwitcherView::ScheduleRebuild, base::Unretained(this)));
++
++    if (browser_) {
++      controller_ = workspaces::WorkspaceController::From(browser_);
++    }
++    if (controller_) {
++      controller_observation_.Observe(controller_);
++      browser_->GetTabStripModel()->AddObserver(this);
++    }
++    RebuildNow();
++  }
++
++  WorkspaceSwitcherView(const WorkspaceSwitcherView&) = delete;
++  WorkspaceSwitcherView& operator=(const WorkspaceSwitcherView&) = delete;
++  ~WorkspaceSwitcherView() override = default;
++
++  void OnWorkspacesChanged() override { ScheduleRebuild(); }
++
++  void OnActiveWorkspaceChanged() override { ScheduleRebuild(); }
++
++  void OnTabGroupChanged(const TabGroupChange& change) override {
++    switch (change.type) {
++      case TabGroupChange::kCreated:
++      case TabGroupChange::kVisualsChanged:
++      case TabGroupChange::kMoved:
++      case TabGroupChange::kClosed:
++        ScheduleRebuild();
++        break;
++      case TabGroupChange::kEditorOpened:
++        break;
++    }
++  }
++
++  void OnThemeChanged() override {
++    views::FlexLayoutView::OnThemeChanged();
++    ScheduleRebuild();
++  }
++
++ private:
++  void ShowContextMenuForViewImpl(
++      views::View* source,
++      const gfx::Point& point,
++      ui::mojom::MenuSourceType source_type) override {
++    auto* chip = views::AsViewClass<WorkspaceChipButton>(source);
++    if (!chip || !browser_ || editor_bubble_tracker_.is_open()) {
++      return;
++    }
++    TabStripModel* model = browser_->GetTabStripModel();
++    if (!model->group_model() ||
++        !model->group_model()->ContainsTabGroup(chip->group_id())) {
++      return;
++    }
++
++    constexpr bool kStopContextMenuPropagation =
++#if BUILDFLAG(IS_MAC)
++        false;
++#else
++        true;
++#endif
++    editor_bubble_tracker_.Opened(TabGroupEditorBubbleView::Show(
++        browser_, chip->group_id(), chip, std::nullopt,
++        kStopContextMenuPropagation));
++  }
++
++  void ScheduleRebuild() {
++    if (rebuild_scheduled_) {
++      return;
++    }
++    rebuild_scheduled_ = true;
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&WorkspaceSwitcherView::RebuildNow,
++                                  weak_factory_.GetWeakPtr()));
++  }
++
++  void RebuildNow() {
++    rebuild_scheduled_ = false;
++    if (editor_bubble_tracker_.is_open()) {
++      return;
++    }
++
++    RemoveAllChildViews();
++    if (!controller_ || !browser_) {
++      SetVisible(false);
++      SetPreferredSize(gfx::Size());
++      return;
++    }
++
++    SetVisible(true);
++    SetPreferredSize(std::nullopt);
++
++    TabStripModel* model = browser_->GetTabStripModel();
++    TabGroupModel* groups = model->group_model();
++    const std::optional<tab_groups::TabGroupId> active =
++        controller_->GetActiveWorkspace();
++    for (const tab_groups::TabGroupId& group_id : controller_->GetWorkspaces()) {
++      if (!groups || !groups->ContainsTabGroup(group_id)) {
++        continue;
++      }
++      const tab_groups::TabGroupVisualData* visuals =
++          groups->GetTabGroup(group_id)->visual_data();
++      const std::u16string& title = visuals->title();
++      auto chip = std::make_unique<WorkspaceChipButton>(
++          base::BindRepeating(&WorkspaceSwitcherView::ActivateWorkspaceById,
++                              weak_factory_.GetWeakPtr(), group_id),
++          LeadingEmoji(title), group_id);
++      ConfigureChip(chip.get());
++      chip->SetTooltipText(title);
++      chip->SetAccessibleName(
++          l10n_util::GetStringFUTF16(IDS_WORKSPACE_ITEM_ACCNAME, title));
++      chip->set_context_menu_controller(this);
++      ApplyChipBackground(chip.get(), visuals->color(), active == group_id);
++      AddChildView(std::move(chip));
++    }
++
++    const std::u16string new_workspace_label =
++        l10n_util::GetStringUTF16(IDS_WORKSPACE_NEW_TOOLTIP);
++    auto add_button = std::make_unique<views::LabelButton>(
++        base::BindRepeating(&WorkspaceSwitcherView::CreateNewWorkspace,
++                            weak_factory_.GetWeakPtr()),
++        u"+");
++    ConfigureChip(add_button.get());
++    add_button->SetTooltipText(new_workspace_label);
++    add_button->SetAccessibleName(new_workspace_label);
++    AddChildView(std::move(add_button));
++    InvalidateLayout();
++  }
++
++  void ConfigureChip(views::LabelButton* button) {
++    button->SetPreferredSize(gfx::Size(kChipSize, kChipSize));
++    button->SetHorizontalAlignment(gfx::ALIGN_CENTER);
++    button->SetBorder(views::CreateEmptyBorder(0));
++    views::InstallCircleHighlightPathGenerator(button);
++  }
++
++  void ApplyChipBackground(views::LabelButton* chip,
++                           tab_groups::TabGroupColorId color_id,
++                           bool active) {
++    const ui::ColorProvider* provider = GetColorProvider();
++    if (!provider) {
++      return;
++    }
++    SkColor color =
++        provider->GetColor(GetTabGroupContextMenuColorId(color_id));
++    color = SkColorSetA(color, active ? SK_AlphaOPAQUE : kInactiveChipAlpha);
++    chip->SetBackground(views::CreateRoundedRectBackground(
++        color, static_cast<float>(kChipSize) / 2.0f));
++  }
++
++  void ActivateWorkspaceById(tab_groups::TabGroupId group_id) {
++    if (controller_) {
++      controller_->ActivateWorkspace(group_id);
++    }
++  }
++
++  void CreateNewWorkspace() {
++    if (controller_) {
++      controller_->CreateWorkspace();
++    }
++  }
++
++  const raw_ptr<BrowserWindowInterface> browser_;
++  raw_ptr<workspaces::WorkspaceController> controller_ = nullptr;
++  TabGroupEditorBubbleTracker editor_bubble_tracker_;
++  base::CallbackListSubscription bubble_closed_subscription_;
++  base::ScopedObservation<workspaces::WorkspaceController,
++                          workspaces::WorkspaceController::Observer>
++      controller_observation_{this};
++  bool rebuild_scheduled_ = false;
++  base::WeakPtrFactory<WorkspaceSwitcherView> weak_factory_{this};
++};
++
++BEGIN_METADATA(WorkspaceSwitcherView)
++END_METADATA
++
++}  // namespace
++
++namespace workspaces {
++
++std::unique_ptr<views::View> CreateWorkspaceSwitcherView(
++    BrowserWindowInterface* browser) {
++  return std::make_unique<WorkspaceSwitcherView>(browser);
++}
++
++}  // namespace workspaces
+diff --git a/chrome/browser/ui/views/workspaces/workspace_switcher_view.h b/chrome/browser/ui/views/workspaces/workspace_switcher_view.h
+new file mode 100644
+index 000000000..9252144ba
+--- /dev/null
++++ b/chrome/browser/ui/views/workspaces/workspace_switcher_view.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_WORKSPACES_WORKSPACE_SWITCHER_VIEW_H_
++#define CHROME_BROWSER_UI_VIEWS_WORKSPACES_WORKSPACE_SWITCHER_VIEW_H_
++
++#include <memory>
++
++#include "ui/views/view.h"
++
++class BrowserWindowInterface;
++
++namespace workspaces {
++
++std::unique_ptr<views::View> CreateWorkspaceSwitcherView(
++    BrowserWindowInterface* browser);
++
++}  // namespace workspaces
++
++#endif  // CHROME_BROWSER_UI_VIEWS_WORKSPACES_WORKSPACE_SWITCHER_VIEW_H_

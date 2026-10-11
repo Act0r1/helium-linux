@@ -1,0 +1,1264 @@
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+index d3181174b..c074cd258 100644
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -1513,6 +1513,10 @@ static_library("ui") {
+   } else {
+     # !is_android
+     sources += [
++      "views/workspaces/workspace_switcher_view.cc",
++      "views/workspaces/workspace_switcher_view.h",
++      "workspaces/workspace_controller.cc",
++      "workspaces/workspace_controller.h",
+       # This file physically lives in //chrome/browser but is compiled here so
+       # that //chrome/browser:browser has no remaining sources. It registers
+       # WebUI interface binders for desktop, which need this target's headers.
+@@ -3426,6 +3430,7 @@ static_library("ui") {
+       # - c/b/ui/views/frame/browser_view.h
+       # - c/b/ui/views/frame/themed_background.h
+       # - c/b/ui/views/frame/vertical_tab_strip_region_view.h
++      "//chrome/browser/ui/views/tabs/common",
+       "//chrome/browser/ui/views/tabs/common:impl",
+ 
+       # TODO(crbug.com/353332589): Remove this circular dependency when the
+@@ -4343,13 +4348,22 @@ source_set("unit_tests") {
+       "browser_unittest.cc",
+       "browser_window_state_unittest.cc",
+       "intent_picker_tab_helper_unittest.cc",
++      "workspaces/workspace_controller_unittest.cc",
+     ]
+     deps += [
+       ":accelerator_table",
+       ":browser_window_state",
+       "//chrome/browser/apps/intent_helper:intent_chip_display_prefs",
+       "//chrome/browser/apps/link_capturing:test_support",
++      "//chrome/browser/ui/tabs",
++      "//chrome/browser/ui/tabs:tab_group",
++      "//chrome/browser/ui/tabs:tab_strip",
+       "//components/apps/link_capturing",
++      "//components/tab_groups",
++      "//components/tabs:public",
++      "//content/public/browser",
++      "//ui/base",
++      "//url",
+     ]
+   }
+ 
+diff --git a/chrome/browser/ui/browser_tab_strip_model_delegate.cc b/chrome/browser/ui/browser_tab_strip_model_delegate.cc
+index e4bd28dec..3d15ad989 100644
+--- a/chrome/browser/ui/browser_tab_strip_model_delegate.cc
++++ b/chrome/browser/ui/browser_tab_strip_model_delegate.cc
+@@ -44,6 +44,7 @@
+ #include "chrome/browser/ui/web_applications/app_browser_controller.h"
+ #include "chrome/browser/ui/web_applications/web_app_tabbed_utils.h"
+ #include "chrome/browser/ui/window_feature_controller/window_feature_controller.h"
++#include "chrome/browser/ui/workspaces/workspace_controller.h"
+ #include "chrome/common/chrome_switches.h"
+ #include "components/contextual_tasks/public/features.h"
+ #include "components/feature_engagement/public/feature_constants.h"
+@@ -402,6 +403,10 @@ void BrowserTabStripModelDelegate::OnGroupsDestruction(
+     const std::vector<tab_groups::TabGroupId>& group_ids,
+     base::OnceCallback<void()> close_callback,
+     bool delete_groups) {
++  if (workspaces::WorkspaceController::From(browser_)) {
++    std::move(close_callback).Run();
++    return;
++  }
+   if (!delete_groups) {
+     // Close the groups rather than delete them to retain the saved group.
+     for (auto group_id : group_ids) {
+@@ -421,6 +426,10 @@ void BrowserTabStripModelDelegate::OnGroupsDestruction(
+ void BrowserTabStripModelDelegate::OnRemovingAllTabsFromGroups(
+     const std::vector<tab_groups::TabGroupId>& group_ids,
+     base::OnceCallback<void()> callback) {
++  if (workspaces::WorkspaceController::From(browser_)) {
++    std::move(callback).Run();
++    return;
++  }
+   tab_groups::SavedTabGroupUtils::MaybeShowSavedTabGroupDeletionDialog(
+       browser_, tab_groups::GroupDeletionReason::UngroupedLastTab, group_ids,
+       base::IgnoreArgs<
+@@ -428,6 +437,14 @@ void BrowserTabStripModelDelegate::OnRemovingAllTabsFromGroups(
+           std::move(callback)));
+ }
+ 
++void BrowserTabStripModelDelegate::WillRemoveTabsFromGroups(
++    const std::vector<tabs::TabInterface*>& tabs,
++    std::optional<tab_groups::TabGroupId> destination) {
++  if (auto* workspace = workspaces::WorkspaceController::From(browser_)) {
++    workspace->PrepareForTabRemoval(tabs, destination);
++  }
++}
++
+ void BrowserTabStripModelDelegate::CloseTab(
+     const tabs::TabInterface* tab_interface,
+     CloseTabSource source,
+@@ -469,7 +486,13 @@ void BrowserTabStripModelDelegate::CloseTab(
+     }
+   }
+ 
+-  if (model->count() == 1 && IsNormalWindow() &&
++  if (auto* workspace = workspaces::WorkspaceController::From(browser_)) {
++    workspace->PrepareForTabRemoval({model->GetTabAtIndex(tab_index)});
++    tab_index = model->GetIndexOfTab(tab_interface);
++  }
++
++  if (!workspaces::WorkspaceController::From(browser_) && model->count() == 1 &&
++      IsNormalWindow() &&
+       base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+           "close-window-with-last-tab") == "never") {
+     AddTabAt(GURL(), -1, true, std::nullopt, false);
+@@ -479,7 +502,7 @@ void BrowserTabStripModelDelegate::CloseTab(
+ 
+   // Only consider pausing the close operation if this is the last remaining
+   // tab (since otherwise closing it won't close the browser window).
+-  if (model->count() <= 1) {
++  if (model->count() <= 1 && !workspaces::WorkspaceController::From(browser_)) {
+     // Closing this tab will close the current window. See if the browser wants
+     // to prompt the user before the browser is allowed to close.
+     const UnloadController::WarnBeforeClosingResult result =
+@@ -534,7 +557,8 @@ void BrowserTabStripModelDelegate::CloseTab(
+         if (tab->GetGroup().has_value()) {
+           base::RecordAction(base::UserMetricsAction("CloseGroupedTab"));
+ 
+-          if (model->count() == 1) {
++          if (model->count() == 1 &&
++              !workspaces::WorkspaceController::From(browser)) {
+             // Prevent the browser from closing when the last grouped tab is
+             // closed from the browser by adding a new tab.
+             chrome::NewTab(browser, NewTabTypes::kNoUserAction);
+@@ -558,7 +582,8 @@ void BrowserTabStripModelDelegate::CloseTab(
+       weak_factory_.GetWeakPtr(), tab_interface->GetContents()->GetWeakPtr(),
+       std::move(cb2));
+ 
+-  if (groups_to_delete.empty()) {
++  if (groups_to_delete.empty() ||
++      workspaces::WorkspaceController::From(browser_)) {
+     std::move(do_close).Run(source);
+     return;
+   }
+diff --git a/chrome/browser/ui/browser_tab_strip_model_delegate.h b/chrome/browser/ui/browser_tab_strip_model_delegate.h
+index 36c725ea3..4109d2700 100644
+--- a/chrome/browser/ui/browser_tab_strip_model_delegate.h
++++ b/chrome/browser/ui/browser_tab_strip_model_delegate.h
+@@ -93,6 +93,9 @@ class BrowserTabStripModelDelegate : public TabStripModelDelegate {
+   void OnRemovingAllTabsFromGroups(
+       const std::vector<tab_groups::TabGroupId>& group_ids,
+       base::OnceCallback<void()> callback) override;
++  void WillRemoveTabsFromGroups(
++      const std::vector<tabs::TabInterface*>& tabs,
++      std::optional<tab_groups::TabGroupId> destination) override;
+   void GlicUnpinTabsFromAllConversations(
+       base::span<const tabs::TabHandle> tab_handles) override;
+   void CloseTab(const tabs::TabInterface* tab,
+diff --git a/chrome/browser/ui/browser_window/internal/browser_window_features.cc b/chrome/browser/ui/browser_window/internal/browser_window_features.cc
+index 4af9c3bcc..242e02b99 100644
+--- a/chrome/browser/ui/browser_window/internal/browser_window_features.cc
++++ b/chrome/browser/ui/browser_window/internal/browser_window_features.cc
+@@ -175,6 +175,7 @@
+ #include "chrome/browser/ui/webui_browser/zoom_bubble_manager_webui_browser.h"
+ #include "chrome/browser/ui/window_feature_controller/window_feature_controller.h"
+ #include "chrome/browser/ui/window_metadata/window_metadata_controller.h"
++#include "chrome/browser/ui/workspaces/workspace_controller.h"
+ #include "chrome/browser/ui/zoom/browser_window_zoom_observer.h"
+ #include "chrome/common/chrome_features.h"
+ #include "chrome/common/pref_names.h"
+@@ -658,6 +659,12 @@ void BrowserWindowFeatures::Init(BrowserWindowInterface* browser) {
+                 SessionServiceFactory::GetForProfile(browser_->GetProfile()),
+                 browser_->GetSessionID(), restored_state_collapsed,
+                 restored_state_uncollapsed_width);
++
++    if (profile->IsRegularProfile() && tab_strip_model_->SupportsTabGroups()) {
++      workspace_controller_ =
++          GetUserDataFactory().CreateInstance<workspaces::WorkspaceController>(
++              *browser, browser);
++    }
+   }
+ 
+   // Constructed last, out of alphabetical order:
+diff --git a/chrome/browser/ui/browser_window/public/browser_window_features.h b/chrome/browser/ui/browser_window/public/browser_window_features.h
+index 97994752f..c75a36213 100644
+--- a/chrome/browser/ui/browser_window/public/browser_window_features.h
++++ b/chrome/browser/ui/browser_window/public/browser_window_features.h
+@@ -265,6 +265,10 @@ namespace ttc {
+ class AiOverlayDialogController;
+ }  // namespace ttc
+ 
++namespace workspaces {
++class WorkspaceController;
++}  // namespace workspaces
++
+ namespace web_app {
+ class AppBrowserController;
+ }  // namespace web_app
+@@ -501,6 +505,8 @@ class BrowserWindowFeatures {
+   std::unique_ptr<tabs::VerticalTabStripStateController>
+       vertical_tab_strip_state_controller_;
+ 
++  std::unique_ptr<workspaces::WorkspaceController> workspace_controller_;
++
+   // Must come after fullscreen_controller_.
+   std::unique_ptr<WindowFeatureController> window_feature_controller_;
+   std::unique_ptr<ImmersiveModeController> immersive_mode_controller_;
+diff --git a/chrome/browser/ui/tabs/tab_strip_model.cc b/chrome/browser/ui/tabs/tab_strip_model.cc
+index b7677a9f5..d7ea85756 100644
+--- a/chrome/browser/ui/tabs/tab_strip_model.cc
++++ b/chrome/browser/ui/tabs/tab_strip_model.cc
+@@ -629,6 +629,7 @@ std::unique_ptr<DetachedTab> TabStripModel::DetachTabWithReasonAt(
+     int index,
+     TabRemovedReason web_contents_remove_reason,
+     tabs::TabInterface::DetachReason tab_detach_reason) {
++  index = PrepareGroupsForTabRemovalAt({index})[0];
+   ReentrancyCheck reentrancy_check(&reentrancy_guard_);
+ 
+   CHECK_NE(GetActiveTab(), nullptr) << "Activate the TabStripModel by "
+@@ -706,9 +707,14 @@ TabStripModel::DetachTabGroupForInsertion(
+ std::unique_ptr<DetachedTabCollection>
+ TabStripModel::DetachSplitTabForInsertion(
+     const split_tabs::SplitTabId split_id) {
+-  ReentrancyCheck reentrancy_check(&reentrancy_guard_);
+-
+   CHECK(GetSplitData(split_id));
++  std::vector<tabs::TabInterface*> tabs_to_detach;
++  for (tabs::TabInterface* tab :
++       *contents_data_->GetSplitTabCollection(split_id)) {
++    tabs_to_detach.push_back(tab);
++  }
++  PrepareGroupsForTabRemoval(tabs_to_detach);
++  ReentrancyCheck reentrancy_check(&reentrancy_guard_);
+ 
+   std::vector<std::pair<tabs::TabInterface*, int>> tabs_in_split =
+       GetTabsAndIndicesInSplit(split_id);
+@@ -1482,6 +1488,7 @@ void TabStripModel::CloseWebContents(content::WebContents* contents,
+ 
+   CHECK(contents);
+   CHECK_NE(GetIndexOfWebContents(contents), kNoTab);
++  PrepareGroupsForTabRemoval({GetTabForWebContents(contents)});
+   CloseTabs({contents}, close_types);
+ }
+ 
+@@ -1569,8 +1576,11 @@ void TabStripModel::SetTabBlocked(int index, bool blocked) {
+ }
+ 
+ int TabStripModel::SetTabPinned(int index, bool pinned) {
+-  ReentrancyCheck reentrancy_check(&reentrancy_guard_);
+   CHECK(ContainsIndex(index));
++  if (pinned) {
++    index = PrepareGroupsForTabRemovalAt({index})[0];
++  }
++  ReentrancyCheck reentrancy_check(&reentrancy_guard_);
+ 
+   if (IsTabPinned(index) == pinned) {
+     return index;
+@@ -2012,6 +2022,16 @@ void TabStripModel::SelectPreviousTab(TabStripUserGestureDetails detail) {
+   SelectRelativeTabCycle(TabRelativeDirection::kPrevious, detail);
+ }
+ 
++void TabStripModel::SelectNextTabAmong(const std::vector<int>& indices,
++                                       TabStripUserGestureDetails detail) {
++  SelectRelativeTabCycle(TabRelativeDirection::kNext, detail, &indices);
++}
++
++void TabStripModel::SelectPreviousTabAmong(const std::vector<int>& indices,
++                                           TabStripUserGestureDetails detail) {
++  SelectRelativeTabCycle(TabRelativeDirection::kPrevious, detail, &indices);
++}
++
+ void TabStripModel::SelectLastTab(TabStripUserGestureDetails detail) {
+   if (!empty()) {
+     ActivateTab(*rbegin(), detail);
+@@ -2195,7 +2215,8 @@ void TabStripModel::RestoreSplit(split_tabs::SplitTabId split_id,
+ }
+ 
+ tab_groups::TabGroupId TabStripModel::AddToNewGroup(
+-    const std::vector<int> indices) {
++    std::vector<int> indices) {
++  indices = PrepareGroupsForTabRemovalAt(indices);
+   ReentrancyCheck reentrancy_check(&reentrancy_guard_);
+   CHECK(SupportsTabGroups());
+ 
+@@ -2224,9 +2245,10 @@ tab_groups::TabGroupId TabStripModel::AddToNewGroup(
+   return new_group;
+ }
+ 
+-void TabStripModel::AddToExistingGroup(const std::vector<int> indices,
++void TabStripModel::AddToExistingGroup(std::vector<int> indices,
+                                        const tab_groups::TabGroupId group,
+                                        const bool add_to_end) {
++  indices = PrepareGroupsForTabRemovalAt(indices, group);
+   ReentrancyCheck reentrancy_check(&reentrancy_guard_);
+ 
+   CHECK(SupportsTabGroups());
+@@ -2261,7 +2283,8 @@ void TabStripModel::AddToGroupForRestore(const std::vector<int>& indices,
+   }
+ }
+ 
+-void TabStripModel::RemoveFromGroup(const std::vector<int>& indices) {
++void TabStripModel::RemoveFromGroup(const std::vector<int>& group_indices) {
++  const std::vector<int> indices = PrepareGroupsForTabRemovalAt(group_indices);
+   ReentrancyCheck reentrancy_check(&reentrancy_guard_);
+ 
+   if (!group_model_) {
+@@ -2929,6 +2952,11 @@ void TabStripModel::ExecuteContextMenuCommand(int context_index,
+       base::UmaHistogramCounts1000(
+           "Tab.ContextMenu.TogglePinned.SelectedTabsCount",
+           selection_model_.size());
++      if (WillContextMenuPin(context_index)) {
++        tabs::TabInterface* const context_tab = GetTabAtIndex(context_index);
++        PrepareGroupsForTabRemovalAt(GetIndicesForCommand(context_index));
++        context_index = GetIndexOfTab(context_tab);
++      }
+       ReentrancyCheck reentrancy_check(&reentrancy_guard_);
+ 
+       base::RecordAction(UserMetricsAction("TabContextMenu_TogglePinned"));
+@@ -3443,6 +3471,7 @@ void TabStripModel::ExecuteCloseTabs(
+   ReentrancyCheck::ValidateNotReentrant(&reentrancy_guard_);
+   const std::vector<tabs::TabInterface*> tabs_to_close =
+       std::move(get_tabs_to_close).Run();
++  PrepareGroupsForTabRemoval(tabs_to_close);
+   if (!tabs_to_close.empty() && !closing_all_ &&
+       static_cast<int>(tabs_to_close.size()) == count() &&
+       delegate()->IsNormalWindow() &&
+@@ -4375,20 +4404,26 @@ TabStripSelectionChange TabStripModel::SetSelection(
+ }
+ 
+ void TabStripModel::SelectRelativeTabCycle(TabRelativeDirection direction,
+-                                           TabStripUserGestureDetails detail) {
++                                           TabStripUserGestureDetails detail,
++                                           const std::vector<int>* allowed) {
+   const bool enable_mru =
+       profile_->GetPrefs()->GetBoolean(prefs::kTabCyclingMRU);
+ 
+   if (enable_mru) {
+-    SelectMRUTab(direction, detail);
++    SelectMRUTab(direction, detail, allowed);
+   } else {
+-    SelectRelativeTab(direction, detail);
++    SelectRelativeTab(direction, detail, allowed);
+   }
+ }
+ 
+ void TabStripModel::SelectMRUTab(TabRelativeDirection direction,
+-                                 TabStripUserGestureDetails detail) {
++                                 TabStripUserGestureDetails detail,
++                                 const std::vector<int>* allowed) {
+   if (mru_cycle_list_.empty()) {
++    if (allowed && (empty() || allowed->empty())) {
++      return;
++    }
++
+     BrowserWindowInterface* browser =
+         GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+           GetWebContentsAt(0));
+@@ -4396,8 +4431,19 @@ void TabStripModel::SelectMRUTab(TabRelativeDirection direction,
+       return;
+     }
+ 
+-    for (int i = 0; i < count(); ++i) {
+-      mru_cycle_list_.push_back(i);
++    if (allowed) {
++      for (int index : *allowed) {
++        if (ContainsIndex(index)) {
++          mru_cycle_list_.push_back(index);
++        }
++      }
++      if (mru_cycle_list_.empty()) {
++        return;
++      }
++    } else {
++      for (int i = 0; i < count(); ++i) {
++        mru_cycle_list_.push_back(i);
++      }
+     }
+ 
+     std::sort(mru_cycle_list_.begin(), mru_cycle_list_.end(),
+@@ -4428,7 +4474,57 @@ void TabStripModel::StopMRUCycling() {
+ }
+ 
+ void TabStripModel::SelectRelativeTab(TabRelativeDirection direction,
+-                                      TabStripUserGestureDetails detail) {
++                                      TabStripUserGestureDetails detail,
++                                      const std::vector<int>* allowed) {
++  if (allowed) {
++    if (empty()) {
++      return;
++    }
++
++    std::optional<tab_groups::TabGroupId> focused_group = GetFocusedGroup();
++    std::vector<int> cycle;
++    cycle.reserve(allowed->size());
++    for (int index : *allowed) {
++      if (!ContainsIndex(index) || IsTabCollapsed(index)) {
++        continue;
++      }
++      if (focused_group.has_value() &&
++          !tabs::TabStripModelSelectionState::IsTabValidInFocusedGroup(
++              GetTabAtIndex(index), focused_group)) {
++        continue;
++      }
++      cycle.push_back(index);
++    }
++    std::sort(cycle.begin(), cycle.end());
++    cycle.erase(std::unique(cycle.begin(), cycle.end()), cycle.end());
++    if (cycle.empty()) {
++      return;
++    }
++
++    const int start_index = active_index();
++    const auto it = std::find(cycle.begin(), cycle.end(), start_index);
++    int target;
++    if (it == cycle.end()) {
++      if (direction == TabRelativeDirection::kNext) {
++        const auto next =
++            std::upper_bound(cycle.begin(), cycle.end(), start_index);
++        target = next == cycle.end() ? cycle.front() : *next;
++      } else {
++        const auto prev =
++            std::lower_bound(cycle.begin(), cycle.end(), start_index);
++        target = prev == cycle.begin() ? cycle.back() : *(prev - 1);
++      }
++    } else {
++      const size_t pos = static_cast<size_t>(it - cycle.begin());
++      const size_t next_pos = direction == TabRelativeDirection::kNext
++                                  ? (pos + 1) % cycle.size()
++                                  : (pos + cycle.size() - 1) % cycle.size();
++      target = cycle[next_pos];
++    }
++    ActivateTabAt(target, detail);
++    return;
++  }
++
+   // This may happen during automated testing or if a user somehow buffers
+   // many key accelerators.
+   if (empty()) {
+@@ -5590,6 +5686,29 @@ TabStripModel::PrepareTabsToMoveToIndex(const std::vector<int>& tab_indices,
+   return notifications;
+ }
+ 
++void TabStripModel::PrepareGroupsForTabRemoval(
++    const std::vector<tabs::TabInterface*>& tabs,
++    std::optional<tab_groups::TabGroupId> destination) {
++  if (!reentrancy_guard_) {
++    delegate_->WillRemoveTabsFromGroups(tabs, destination);
++  }
++}
++
++std::vector<int> TabStripModel::PrepareGroupsForTabRemovalAt(
++    const std::vector<int>& indices,
++    std::optional<tab_groups::TabGroupId> destination) {
++  std::vector<tabs::TabInterface*> removed_tabs;
++  for (int index : indices) {
++    removed_tabs.push_back(GetTabAtIndex(index));
++  }
++  PrepareGroupsForTabRemoval(removed_tabs, destination);
++  std::vector<int> updated_indices;
++  for (tabs::TabInterface* tab : removed_tabs) {
++    updated_indices.push_back(GetIndexOfTab(tab));
++  }
++  return updated_indices;
++}
++
+ void TabStripModel::SetTabsPinned(std::vector<int> indices, bool pinned) {
+   // `indices` are given in ascending order. If pinning, process the indices as
+   // is, since when moving the tab at `index` to the left, this will not change
+diff --git a/chrome/browser/ui/tabs/tab_strip_model.h b/chrome/browser/ui/tabs/tab_strip_model.h
+index 9236b46a6..00471e2eb 100644
+--- a/chrome/browser/ui/tabs/tab_strip_model.h
++++ b/chrome/browser/ui/tabs/tab_strip_model.h
+@@ -618,6 +618,17 @@ class TabStripModel {
+       TabStripUserGestureDetails detail = TabStripUserGestureDetails(
+           TabStripUserGestureDetails::GestureType::kOther));
+ 
++  // Selects the next or previous tab among `indices`. Indices outside the
++  // strip are ignored. An empty list is a no-op.
++  void SelectNextTabAmong(
++      const std::vector<int>& indices,
++      TabStripUserGestureDetails detail = TabStripUserGestureDetails(
++          TabStripUserGestureDetails::GestureType::kOther));
++  void SelectPreviousTabAmong(
++      const std::vector<int>& indices,
++      TabStripUserGestureDetails detail = TabStripUserGestureDetails(
++          TabStripUserGestureDetails::GestureType::kOther));
++
+   // Selects the last tab in the tab strip.
+   void SelectLastTab(
+       TabStripUserGestureDetails detail = TabStripUserGestureDetails(
+@@ -1191,17 +1202,22 @@ class TabStripModel {
+ 
+   // Selects either the next tab or the previous tab.
+   // Uses MRU order if the user prefers it.
++  // `allowed` restricts the cycle to those indices. Null keeps the unfiltered
++  // behavior. The pointed-to vector must outlive the call; MRU copies it.
+   void SelectRelativeTabCycle(TabRelativeDirection direction,
+-                              TabStripUserGestureDetails detail);
++                              TabStripUserGestureDetails detail,
++                              const std::vector<int>* allowed = nullptr);
+ 
+   // Selects either the most recently used tab
+   // or the least recently used tab.
+   void SelectMRUTab(TabRelativeDirection direction,
+-                    TabStripUserGestureDetails detail);
++                    TabStripUserGestureDetails detail,
++                    const std::vector<int>* allowed = nullptr);
+ 
+   // Selects either the next tab (kNext), or the previous tab (kPrevious).
+   void SelectRelativeTab(TabRelativeDirection direction,
+-                         TabStripUserGestureDetails detail);
++                         TabStripUserGestureDetails detail,
++                         const std::vector<int>* allowed = nullptr);
+ 
+   // Moves the active tab (or its split if it is in one) into the next slot
+   // (kNext), or the previous slot (kPrevious). Respects group boundaries and
+@@ -1351,6 +1367,17 @@ class TabStripModel {
+       const std::vector<int>& tab_indices,
+       int destination_index) const;
+ 
++  // Lets the delegate keep groups from becoming empty before `tabs` leave
++  // them. Does nothing while the model is already being mutated.
++  void PrepareGroupsForTabRemoval(
++      const std::vector<tabs::TabInterface*>& tabs,
++      std::optional<tab_groups::TabGroupId> destination = std::nullopt);
++
++  // Same as above for the tabs at `indices`. Returns their updated indices.
++  std::vector<int> PrepareGroupsForTabRemovalAt(
++      const std::vector<int>& indices,
++      std::optional<tab_groups::TabGroupId> destination = std::nullopt);
++
+   // Changes the pinned state of all tabs at `indices`, moving them in the
+   // process if necessary. If indices contains all tabs in a split, the whole
+   // split is pinned/unpinned. Otherwise, the tabs will be individually
+diff --git a/chrome/browser/ui/tabs/tab_strip_model_delegate.h b/chrome/browser/ui/tabs/tab_strip_model_delegate.h
+index 0967577fa..0135a75b9 100644
+--- a/chrome/browser/ui/tabs/tab_strip_model_delegate.h
++++ b/chrome/browser/ui/tabs/tab_strip_model_delegate.h
+@@ -235,6 +235,13 @@ class TabStripModelDelegate {
+       const std::vector<tab_groups::TabGroupId>& group_ids,
+       base::OnceCallback<void()> callback) = 0;
+ 
++  // Called before `tabs` leave their groups through a removal, pin, ungroup or
++  // regroup. `destination` is the group they join, if any. The delegate may
++  // insert tabs into the model to keep a group from becoming empty.
++  virtual void WillRemoveTabsFromGroups(
++      const std::vector<tabs::TabInterface*>& tabs,
++      std::optional<tab_groups::TabGroupId> destination) {}
++
+   // Glic related delegation (see GlicKeyedService and GlicSharingManager).
+   // Note: 'Pinning' in Glic is a distinct notion.
+ 
+diff --git a/chrome/browser/ui/tabs/tab_strip_prefs.cc b/chrome/browser/ui/tabs/tab_strip_prefs.cc
+index 47f4f372e..874fa65c7 100644
+--- a/chrome/browser/ui/tabs/tab_strip_prefs.cc
++++ b/chrome/browser/ui/tabs/tab_strip_prefs.cc
+@@ -29,8 +29,8 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterIntegerPref(prefs::kVerticalTabsUncollapsedWidth,
+                                 kVerticalTabStripDefaultUncollapsedWidth);
+ 
+-  registry->RegisterIntegerPref(prefs::kHeliumLayout,
+-                                std::to_underlying(HeliumLayoutType::kClassic));
++  registry->RegisterIntegerPref(
++      prefs::kHeliumLayout, std::to_underlying(HeliumLayoutType::kVertical));
+   registry->RegisterBooleanPref(prefs::kHeliumVerticalRightAligned, false);
+   registry->RegisterBooleanPref(prefs::kHeliumZenMode, false);
+   registry->RegisterBooleanPref(prefs::kHeliumZenModeSidebarPinned, false);
+diff --git a/chrome/browser/ui/workspaces/workspace_controller.cc b/chrome/browser/ui/workspaces/workspace_controller.cc
+new file mode 100644
+index 000000000..8b7e20c1f
+--- /dev/null
++++ b/chrome/browser/ui/workspaces/workspace_controller.cc
+@@ -0,0 +1,374 @@
++#include "chrome/browser/ui/workspaces/workspace_controller.h"
++
++#include <algorithm>
++#include <map>
++
++#include "base/auto_reset.h"
++#include "base/functional/bind.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/task/sequenced_task_runner.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/sessions/session_restore.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/tabs/tab_group_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_delegate.h"
++#include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
++#include "chrome/browser/ui/unload_controller.h"
++#include "chrome/grit/generated_resources.h"
++#include "components/tabs/public/tab_group.h"
++#include "ui/base/l10n/l10n_util.h"
++#include "url/gurl.h"
++
++namespace workspaces {
++
++DEFINE_USER_DATA(WorkspaceController);
++
++WorkspaceController::WorkspaceController(BrowserWindowInterface* browser)
++    : browser_(browser),
++      model_(browser->GetTabStripModel()),
++      scoped_unowned_user_data_(browser->GetUnownedUserDataHost(), *this) {
++  CHECK_EQ(browser->GetType(), BrowserWindowInterface::TYPE_NORMAL);
++  CHECK(browser->GetProfile()->IsRegularProfile());
++  CHECK(model_->SupportsTabGroups());
++  model_->AddObserver(this);
++  if (auto* state = tabs::VerticalTabStripStateController::From(browser)) {
++    mode_subscription_ = state->RegisterOnModeChanged(base::BindRepeating(
++        [](WorkspaceController* controller,
++           tabs::VerticalTabStripStateController*) {
++          controller->ScheduleUpdate();
++        },
++        base::Unretained(this)));
++  }
++  restore_subscription_ =
++      SessionRestore::RegisterOnSessionRestoredCallback(base::BindRepeating(
++          &WorkspaceController::OnSessionRestored, base::Unretained(this)));
++  ScheduleUpdate();
++}
++
++WorkspaceController::~WorkspaceController() {
++  TabStripModelObserver::StopObservingAll(this);
++}
++
++WorkspaceController* WorkspaceController::From(
++    BrowserWindowInterface* browser) {
++  return browser ? Get(browser->GetUnownedUserDataHost()) : nullptr;
++}
++
++std::vector<tab_groups::TabGroupId> WorkspaceController::GetWorkspaces() const {
++  std::vector<tab_groups::TabGroupId> groups;
++  if (model_) {
++    for (auto* tab : *model_) {
++      if (auto group = tab->GetGroup();
++          group && !std::ranges::contains(groups, *group)) {
++        groups.push_back(*group);
++      }
++    }
++  }
++  return groups;
++}
++
++std::optional<tab_groups::TabGroupId> WorkspaceController::GetActiveWorkspace()
++    const {
++  if (!model_) {
++    return std::nullopt;
++  }
++  if (auto* tab = model_->GetActiveTab(); tab && tab->GetGroup()) {
++    return tab->GetGroup();
++  }
++  if (last_active_group_ &&
++      model_->group_model()->ContainsTabGroup(*last_active_group_)) {
++    return last_active_group_;
++  }
++  return model_->group_model()->GetMostRecentTabGroupId();
++}
++
++void WorkspaceController::ActivateWorkspace(const tab_groups::TabGroupId& id) {
++  if (!model_) {
++    return;
++  }
++  tabs::TabInterface* most_recent = nullptr;
++  for (auto it = activation_order_.rbegin(); it != activation_order_.rend();
++       ++it) {
++    if (auto* tab = it->Get();
++        tab && tab->GetGroup() == id &&
++        model_->GetIndexOfTab(tab) != TabStripModel::kNoTab) {
++      most_recent = tab;
++      break;
++    }
++  }
++  if (!most_recent) {
++    for (auto* tab : *model_) {
++      if (tab->GetGroup() == id &&
++          (!most_recent ||
++           tab->GetLastActiveTime() > most_recent->GetLastActiveTime())) {
++        most_recent = tab;
++      }
++    }
++  }
++  if (most_recent) {
++    model_->ActivateTab(most_recent);
++    UpdateCollapsedGroups();
++    ScheduleUpdate();
++  }
++}
++
++void WorkspaceController::ActivateWorkspaceAt(int index) {
++  const auto groups = GetWorkspaces();
++  if (index >= 0 && static_cast<size_t>(index) < groups.size()) {
++    ActivateWorkspace(groups[index]);
++  }
++}
++
++void WorkspaceController::ActivateRelativeWorkspace(int offset) {
++  const auto groups = GetWorkspaces();
++  if (groups.empty()) {
++    return;
++  }
++  const auto active = GetActiveWorkspace();
++  const auto it = active ? std::ranges::find(groups, *active) : groups.end();
++  const int count = static_cast<int>(groups.size());
++  const int index =
++      it == groups.end() ? 0 : static_cast<int>(it - groups.begin());
++  ActivateWorkspace(groups[(index + offset + count) % count]);
++}
++
++void WorkspaceController::ActivateNextWorkspace() {
++  ActivateRelativeWorkspace(1);
++}
++
++void WorkspaceController::ActivatePreviousWorkspace() {
++  ActivateRelativeWorkspace(-1);
++}
++
++tab_groups::TabGroupId WorkspaceController::CreateNamedWorkspace(
++    const std::u16string& title) {
++  base::AutoReset<bool> updating(&updating_, true);
++  model_->delegate()->AddTabAt(GURL(), -1, true);
++  const auto id = model_->AddToNewGroup({model_->active_index()});
++  const auto color =
++      model_->group_model()->GetTabGroup(id)->visual_data()->color();
++  model_->ChangeTabGroupVisuals(id,
++                                tab_groups::TabGroupVisualData(title, color));
++  return id;
++}
++
++tab_groups::TabGroupId WorkspaceController::CreateWorkspace() {
++  const auto id = CreateNamedWorkspace(l10n_util::GetStringFUTF16(
++      IDS_WORKSPACE_NEW_NAME,
++      base::NumberToString16(GetWorkspaces().size() + 1)));
++  UpdateCollapsedGroups();
++  ScheduleUpdate();
++  return id;
++}
++
++void WorkspaceController::CloseWorkspace(const tab_groups::TabGroupId& id) {
++  if (!model_->group_model()->ContainsTabGroup(id) || IsClosingWindow()) {
++    return;
++  }
++  if (GetWorkspaces().size() == 1) {
++    CreateNamedWorkspace(l10n_util::GetStringUTF16(IDS_WORKSPACE_DEFAULT_NAME));
++  } else if (GetActiveWorkspace() == id) {
++    ActivateNextWorkspace();
++  }
++  closing_workspaces_.insert(id);
++  model_->CloseAllTabsInGroup(id);
++  ScheduleUpdate();
++}
++
++bool WorkspaceController::IsTabVisible(const tabs::TabInterface* tab) const {
++  return tab && (tab->IsPinned() ||
++                 (tab->GetGroup() && tab->GetGroup() == GetActiveWorkspace()));
++}
++
++std::vector<tabs::TabInterface*> WorkspaceController::GetVisibleTabs() const {
++  std::vector<tabs::TabInterface*> tabs;
++  if (model_) {
++    for (auto* tab : *model_) {
++      if (IsTabVisible(tab)) {
++        tabs.push_back(tab);
++      }
++    }
++  }
++  return tabs;
++}
++
++void WorkspaceController::AddObserver(Observer* observer) {
++  observers_.AddObserver(observer);
++}
++
++void WorkspaceController::RemoveObserver(Observer* observer) {
++  observers_.RemoveObserver(observer);
++}
++
++bool WorkspaceController::IsClosingWindow() const {
++  if (!model_ || model_->closing_all()) {
++    return true;
++  }
++  const auto* unload = UnloadController::From(browser_);
++  return unload && (unload->is_attempting_to_close_browser() ||
++                    unload->is_delete_scheduled());
++}
++
++void WorkspaceController::PrepareForTabRemoval(
++    const std::vector<tabs::TabInterface*>& tabs,
++    std::optional<tab_groups::TabGroupId> destination) {
++  if (updating_ || IsClosingWindow() ||
++      SessionRestore::IsRestoring(browser_->GetProfile())) {
++    return;
++  }
++  std::map<tab_groups::TabGroupId, size_t> leaving;
++  for (auto* tab : tabs) {
++    if (auto group = tab->GetGroup(); group && group != destination) {
++      ++leaving[*group];
++    }
++  }
++  base::AutoReset<bool> updating(&updating_, true);
++  for (const auto& [id, count] : leaving) {
++    auto* group = model_->group_model()->GetTabGroup(id);
++    if (closing_workspaces_.contains(id)) {
++      continue;
++    }
++    if (count == static_cast<size_t>(group->tab_count())) {
++      group->SetGroupIsClosing(false);
++      model_->delegate()->AddTabAt(GURL(), -1, false, id);
++    }
++  }
++}
++
++void WorkspaceController::ScheduleUpdate() {
++  if (updating_ || update_pending_ || !model_) {
++    return;
++  }
++  update_pending_ = true;
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&WorkspaceController::Update, weak_factory_.GetWeakPtr()));
++}
++
++void WorkspaceController::Update() {
++  update_pending_ = false;
++  if (IsClosingWindow() ||
++      SessionRestore::IsRestoring(browser_->GetProfile())) {
++    return;
++  }
++  {
++    base::AutoReset<bool> updating(&updating_, true);
++    auto group = GetActiveWorkspace();
++    std::vector<tabs::TabInterface*> ungrouped;
++    for (auto* tab : *model_) {
++      if (!tab->IsPinned() && !tab->GetGroup()) {
++        ungrouped.push_back(tab);
++      }
++    }
++    for (auto* tab : ungrouped) {
++      const int index = model_->GetIndexOfTab(tab);
++      if (group) {
++        model_->AddToExistingGroup({index}, *group);
++      } else {
++        group = model_->AddToNewGroup({index});
++        const auto color =
++            model_->group_model()->GetTabGroup(*group)->visual_data()->color();
++        model_->ChangeTabGroupVisuals(
++            *group,
++            tab_groups::TabGroupVisualData(
++                l10n_util::GetStringUTF16(IDS_WORKSPACE_DEFAULT_NAME), color));
++      }
++    }
++    std::erase_if(closing_workspaces_, [this](const auto& id) {
++      return !model_->group_model()->ContainsTabGroup(id) ||
++             !model_->group_model()->GetTabGroup(id)->IsGroupClosing();
++    });
++    if (auto* tab = model_->GetActiveTab(); tab && tab->GetGroup()) {
++      last_active_group_ = tab->GetGroup();
++    }
++    UpdateCollapsedGroups();
++  }
++  const auto active = GetActiveWorkspace();
++  if (active != last_notified_workspace_) {
++    last_notified_workspace_ = active;
++    for (auto& observer : observers_) {
++      observer.OnActiveWorkspaceChanged();
++    }
++  }
++  for (auto& observer : observers_) {
++    observer.OnWorkspacesChanged();
++  }
++}
++
++void WorkspaceController::UpdateCollapsedGroups() {
++  if (!model_) {
++    return;
++  }
++  const auto active = GetActiveWorkspace();
++  auto* state = tabs::VerticalTabStripStateController::From(browser_);
++  const bool vertical = state && state->ShouldDisplayVerticalTabs();
++  for (const auto& id : GetWorkspaces()) {
++    auto* group = model_->group_model()->GetTabGroup(id);
++    const auto* visuals = group->visual_data();
++    const bool collapsed = !vertical && id != active;
++    if (visuals->is_collapsed() != collapsed) {
++      model_->ChangeTabGroupVisuals(
++          id, tab_groups::TabGroupVisualData(visuals->title(), visuals->color(),
++                                             collapsed));
++    }
++  }
++}
++
++void WorkspaceController::OnSessionRestored(Profile* profile, int tab_count) {
++  if (profile == browser_->GetProfile()) {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&WorkspaceController::ScheduleUpdate,
++                                  weak_factory_.GetWeakPtr()));
++  }
++}
++
++void WorkspaceController::OnTabStripModelChanged(
++    TabStripModel* model,
++    const TabStripModelChange& change,
++    const TabStripSelectionChange& selection) {
++  if (change.type() == TabStripModelChange::kRemoved) {
++    for (const auto& removed : change.GetRemove()->contents) {
++      std::erase(activation_order_, removed.tab->GetHandle());
++    }
++  }
++  if (selection.new_tab) {
++    if (selection.new_tab->GetGroup()) {
++      last_active_group_ = selection.new_tab->GetGroup();
++    }
++    if (selection.active_tab_changed()) {
++      const auto handle = selection.new_tab->GetHandle();
++      std::erase(activation_order_, handle);
++      activation_order_.push_back(handle);
++    }
++  }
++  ScheduleUpdate();
++}
++
++void WorkspaceController::TabGroupedStateChanged(
++    TabStripModel* model,
++    std::optional<tab_groups::TabGroupId> old_group,
++    std::optional<tab_groups::TabGroupId> new_group,
++    tabs::TabInterface* tab,
++    int index) {
++  if (tab == model_->GetActiveTab() && new_group) {
++    last_active_group_ = new_group;
++  }
++  ScheduleUpdate();
++}
++
++void WorkspaceController::OnTabPinnedStateChanged(tabs::TabInterface* tab,
++                                                  int index) {
++  ScheduleUpdate();
++}
++
++void WorkspaceController::OnTabGroupChanged(const TabGroupChange& change) {
++  ScheduleUpdate();
++}
++
++void WorkspaceController::OnTabStripModelDestroyed(TabStripModel* model) {
++  model_ = nullptr;
++  weak_factory_.InvalidateWeakPtrs();
++}
++
++}  // namespace workspaces
+diff --git a/chrome/browser/ui/workspaces/workspace_controller.h b/chrome/browser/ui/workspaces/workspace_controller.h
+new file mode 100644
+index 000000000..196aa8446
+--- /dev/null
++++ b/chrome/browser/ui/workspaces/workspace_controller.h
+@@ -0,0 +1,100 @@
++#ifndef CHROME_BROWSER_UI_WORKSPACES_WORKSPACE_CONTROLLER_H_
++#define CHROME_BROWSER_UI_WORKSPACES_WORKSPACE_CONTROLLER_H_
++
++#include <optional>
++#include <set>
++#include <string>
++#include <vector>
++
++#include "base/callback_list.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/observer_list.h"
++#include "base/observer_list_types.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
++
++class BrowserTabStripModelDelegate;
++class BrowserWindowInterface;
++class Profile;
++
++namespace workspaces {
++
++class WorkspaceController : public TabStripModelObserver {
++ public:
++  DECLARE_USER_DATA(WorkspaceController);
++
++  class Observer : public base::CheckedObserver {
++   public:
++    virtual void OnWorkspacesChanged() {}
++    virtual void OnActiveWorkspaceChanged() {}
++  };
++
++  explicit WorkspaceController(BrowserWindowInterface* browser);
++  ~WorkspaceController() override;
++  WorkspaceController(const WorkspaceController&) = delete;
++  WorkspaceController& operator=(const WorkspaceController&) = delete;
++
++  static WorkspaceController* From(BrowserWindowInterface* browser);
++
++  std::vector<tab_groups::TabGroupId> GetWorkspaces() const;
++  std::optional<tab_groups::TabGroupId> GetActiveWorkspace() const;
++  void ActivateWorkspace(const tab_groups::TabGroupId& id);
++  void ActivateWorkspaceAt(int index);
++  void ActivateNextWorkspace();
++  void ActivatePreviousWorkspace();
++  tab_groups::TabGroupId CreateWorkspace();
++  void CloseWorkspace(const tab_groups::TabGroupId& id);
++
++  bool IsTabVisible(const tabs::TabInterface* tab) const;
++  std::vector<tabs::TabInterface*> GetVisibleTabs() const;
++
++  void AddObserver(Observer* observer);
++  void RemoveObserver(Observer* observer);
++
++ private:
++  friend class ::BrowserTabStripModelDelegate;
++  friend class ::TabStripModel;
++
++  void PrepareForTabRemoval(
++      const std::vector<tabs::TabInterface*>& tabs,
++      std::optional<tab_groups::TabGroupId> destination = std::nullopt);
++  bool IsClosingWindow() const;
++  void ScheduleUpdate();
++  void Update();
++  void UpdateCollapsedGroups();
++  void OnSessionRestored(Profile* profile, int tab_count);
++  void ActivateRelativeWorkspace(int offset);
++  tab_groups::TabGroupId CreateNamedWorkspace(const std::u16string& title);
++
++  void OnTabStripModelChanged(
++      TabStripModel* model,
++      const TabStripModelChange& change,
++      const TabStripSelectionChange& selection) override;
++  void TabGroupedStateChanged(TabStripModel* model,
++                              std::optional<tab_groups::TabGroupId> old_group,
++                              std::optional<tab_groups::TabGroupId> new_group,
++                              tabs::TabInterface* tab,
++                              int index) override;
++  void OnTabPinnedStateChanged(tabs::TabInterface* tab, int index) override;
++  void OnTabGroupChanged(const TabGroupChange& change) override;
++  void OnTabStripModelDestroyed(TabStripModel* model) override;
++
++  const raw_ptr<BrowserWindowInterface> browser_;
++  raw_ptr<TabStripModel> model_;
++  base::ObserverList<Observer> observers_;
++  std::optional<tab_groups::TabGroupId> last_notified_workspace_;
++  std::optional<tab_groups::TabGroupId> last_active_group_;
++  std::vector<tabs::TabHandle> activation_order_;
++  std::set<tab_groups::TabGroupId> closing_workspaces_;
++  bool update_pending_ = false;
++  bool updating_ = false;
++  base::CallbackListSubscription mode_subscription_;
++  base::CallbackListSubscription restore_subscription_;
++  ui::ScopedUnownedUserData<WorkspaceController> scoped_unowned_user_data_;
++  base::WeakPtrFactory<WorkspaceController> weak_factory_{this};
++};
++
++}  // namespace workspaces
++
++#endif  // CHROME_BROWSER_UI_WORKSPACES_WORKSPACE_CONTROLLER_H_
+diff --git a/chrome/browser/ui/workspaces/workspace_controller_unittest.cc b/chrome/browser/ui/workspaces/workspace_controller_unittest.cc
+new file mode 100644
+index 000000000..9ae65534d
+--- /dev/null
++++ b/chrome/browser/ui/workspaces/workspace_controller_unittest.cc
+@@ -0,0 +1,210 @@
++#include "chrome/browser/ui/workspaces/workspace_controller.h"
++
++#include "base/run_loop.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/tabs/tab_group_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_delegate.h"
++#include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
++#include "chrome/common/webui_url_constants.h"
++#include "chrome/grit/generated_resources.h"
++#include "chrome/test/base/browser_with_test_window_test.h"
++#include "components/tabs/public/tab_group.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/base/l10n/l10n_util.h"
++#include "url/gurl.h"
++
++namespace workspaces {
++
++class WorkspaceControllerTest : public BrowserWithTestWindowTest {
++ protected:
++  WorkspaceController* controller() {
++    return WorkspaceController::From(browser());
++  }
++  TabStripModel* model() { return browser()->GetTabStripModel(); }
++  void Flush() { base::RunLoop().RunUntilIdle(); }
++  tabs::TabInterface* AddUngroupedTab() {
++    AddTab(browser(), GURL("https://example.test/"));
++    auto* tab = model()->GetActiveTab();
++    Flush();
++    return tab;
++  }
++};
++
++TEST_F(WorkspaceControllerTest, UngroupedInsertCreatesDefaultWorkspace) {
++  ASSERT_NE(nullptr, controller());
++  auto* tab = AddUngroupedTab();
++  ASSERT_TRUE(tab->GetGroup());
++  EXPECT_EQ(tab->GetGroup(), controller()->GetActiveWorkspace());
++  EXPECT_EQ(1u, controller()->GetWorkspaces().size());
++  EXPECT_EQ(l10n_util::GetStringUTF16(IDS_WORKSPACE_DEFAULT_NAME),
++            model()
++                ->group_model()
++                ->GetTabGroup(*tab->GetGroup())
++                ->visual_data()
++                ->title());
++  auto* second = AddUngroupedTab();
++  EXPECT_EQ(tab->GetGroup(), second->GetGroup());
++}
++
++TEST_F(WorkspaceControllerTest, EssentialRetainsWorkspaceAndUnpinsIntoIt) {
++  auto* essential = AddUngroupedTab();
++  AddUngroupedTab();
++  model()->SetTabPinned(model()->GetIndexOfTab(essential), true);
++  const auto second = controller()->CreateWorkspace();
++  model()->ActivateTab(essential);
++  Flush();
++  EXPECT_EQ(second, controller()->GetActiveWorkspace());
++  EXPECT_TRUE(controller()->IsTabVisible(essential));
++  model()->SetTabPinned(model()->GetIndexOfTab(essential), false);
++  Flush();
++  EXPECT_EQ(second, essential->GetGroup());
++}
++
++TEST_F(WorkspaceControllerTest, ActivatesMostRecentlyUsedTabInWorkspace) {
++  auto* first = AddUngroupedTab();
++  const auto group = first->GetGroup().value();
++  auto* second = AddUngroupedTab();
++  model()->ActivateTab(first);
++  controller()->CreateWorkspace();
++  controller()->ActivateWorkspace(group);
++  EXPECT_EQ(first, model()->GetActiveTab());
++  model()->ActivateTab(second);
++  controller()->ActivateNextWorkspace();
++  controller()->ActivatePreviousWorkspace();
++  EXPECT_EQ(second, model()->GetActiveTab());
++}
++
++TEST_F(WorkspaceControllerTest,
++       BackgroundGroupDoesNotChangeEssentialWorkspace) {
++  auto* essential = AddUngroupedTab();
++  const auto first = essential->GetGroup().value();
++  auto* background = AddUngroupedTab();
++  AddUngroupedTab();
++  model()->SetTabPinned(model()->GetIndexOfTab(essential), true);
++  model()->ActivateTab(essential);
++  model()->AddToNewGroup({model()->GetIndexOfTab(background)});
++  Flush();
++  EXPECT_EQ(first, controller()->GetActiveWorkspace());
++}
++
++TEST_F(WorkspaceControllerTest,
++       VisibleTabsContainEssentialsThenActiveWorkspace) {
++  auto* essential = AddUngroupedTab();
++  auto* first = AddUngroupedTab();
++  model()->SetTabPinned(model()->GetIndexOfTab(essential), true);
++  const auto second_group = controller()->CreateWorkspace();
++  auto* second = model()->GetActiveTab();
++  Flush();
++  EXPECT_FALSE(controller()->IsTabVisible(first));
++  EXPECT_EQ((std::vector<tabs::TabInterface*>{essential, second}),
++            controller()->GetVisibleTabs());
++  EXPECT_EQ(second_group, controller()->GetActiveWorkspace());
++  controller()->ActivateWorkspaceAt(-1);
++  controller()->ActivateWorkspaceAt(100);
++  EXPECT_EQ(second, model()->GetActiveTab());
++}
++
++TEST_F(WorkspaceControllerTest, NativeRestoredGroupsAndPinnedTabsArePreserved) {
++  AddTab(browser(), GURL("https://restored.test/"));
++  auto* grouped = model()->GetActiveTab();
++  const auto restored = tab_groups::TabGroupId::GenerateNew();
++  model()->AddToGroupForRestore({model()->GetIndexOfTab(grouped)}, restored);
++  model()->ChangeTabGroupVisuals(
++      restored, tab_groups::TabGroupVisualData(
++                    u"Restored", tab_groups::TabGroupColorId::kBlue));
++  AddTab(browser(), GURL("https://essential.test/"));
++  auto* pinned = model()->GetActiveTab();
++  model()->SetTabPinned(model()->GetIndexOfTab(pinned), true);
++  AddTab(browser(), GURL("https://ungrouped.test/"));
++  auto* ungrouped = model()->GetActiveTab();
++  Flush();
++  EXPECT_TRUE(pinned->IsPinned());
++  EXPECT_FALSE(pinned->GetGroup());
++  EXPECT_EQ(restored, grouped->GetGroup());
++  EXPECT_EQ(restored, ungrouped->GetGroup());
++  EXPECT_EQ(
++      u"Restored",
++      model()->group_model()->GetTabGroup(restored)->visual_data()->title());
++}
++
++TEST_F(WorkspaceControllerTest, LastTabCloseKeepsGroupAndInsertsNewTabPage) {
++  auto* tab = AddUngroupedTab();
++  const auto group = tab->GetGroup().value();
++  model()->CloseWebContentsAt(model()->GetIndexOfTab(tab),
++                              TabCloseTypes::CLOSE_NONE);
++  EXPECT_EQ(1, model()->count());
++  ASSERT_TRUE(model()->group_model()->ContainsTabGroup(group));
++  EXPECT_EQ(group, model()->GetTabAtIndex(0)->GetGroup());
++  EXPECT_EQ(GURL(chrome::kChromeUINewTabURL),
++            model()->GetWebContentsAt(0)->GetVisibleURL());
++}
++
++TEST_F(WorkspaceControllerTest, TabStripClosePreservesLastWorkspaceTab) {
++  auto* tab = AddUngroupedTab();
++  const auto group = tab->GetGroup().value();
++  model()->delegate()->CloseTab(tab, CloseTabSource::kFromMouse);
++  EXPECT_EQ(1, model()->count());
++  EXPECT_EQ(group, model()->GetTabAtIndex(0)->GetGroup());
++  EXPECT_EQ(GURL(chrome::kChromeUINewTabURL),
++            model()->GetWebContentsAt(0)->GetVisibleURL());
++}
++
++TEST_F(WorkspaceControllerTest, MovingLastTabPreservesSourceWorkspace) {
++  auto* tab = AddUngroupedTab();
++  const auto source = tab->GetGroup().value();
++  const auto destination = controller()->CreateWorkspace();
++  model()->AddToExistingGroup({model()->GetIndexOfTab(tab)}, destination);
++  EXPECT_TRUE(model()->group_model()->ContainsTabGroup(source));
++  EXPECT_EQ(destination, tab->GetGroup());
++  EXPECT_EQ(3, model()->count());
++}
++
++TEST_F(WorkspaceControllerTest, ExplicitCloseReplacesOnlyWorkspace) {
++  const auto group = AddUngroupedTab()->GetGroup().value();
++  controller()->CloseWorkspace(group);
++  Flush();
++  EXPECT_FALSE(model()->group_model()->ContainsTabGroup(group));
++  EXPECT_EQ(1u, controller()->GetWorkspaces().size());
++  EXPECT_EQ(1, model()->count());
++}
++
++TEST_F(WorkspaceControllerTest, WindowCloseDoesNotCreateReplacementTabs) {
++  AddUngroupedTab();
++  controller()->CreateWorkspace();
++  model()->CloseAllTabs();
++  Flush();
++  EXPECT_TRUE(model()->empty());
++}
++
++TEST_F(WorkspaceControllerTest, HorizontalSwitchCollapsesOnlyInactiveGroups) {
++  const auto first = AddUngroupedTab()->GetGroup().value();
++  const auto second = controller()->CreateWorkspace();
++  EXPECT_TRUE(tabs::VerticalTabStripStateController::From(browser())
++                  ->ShouldDisplayVerticalTabs());
++  tabs::VerticalTabStripStateController::From(browser())
++      ->SetVerticalTabsEnabled(false);
++  controller()->ActivateWorkspace(first);
++  Flush();
++  EXPECT_FALSE(model()
++                   ->group_model()
++                   ->GetTabGroup(first)
++                   ->visual_data()
++                   ->is_collapsed());
++  EXPECT_TRUE(model()
++                  ->group_model()
++                  ->GetTabGroup(second)
++                  ->visual_data()
++                  ->is_collapsed());
++}
++
++TEST_F(WorkspaceControllerTest, InertForPopupAndIncognito) {
++  auto popup =
++      CreateBrowser(profile(), BrowserWindowInterface::TYPE_POPUP, false);
++  EXPECT_EQ(nullptr, WorkspaceController::From(popup.get()));
++  auto incognito = CreateBrowser(profile()->GetPrimaryOTRProfile(true),
++                                 BrowserWindowInterface::TYPE_NORMAL, false);
++  EXPECT_EQ(nullptr, WorkspaceController::From(incognito.get()));
++}
++
++}  // namespace workspaces
