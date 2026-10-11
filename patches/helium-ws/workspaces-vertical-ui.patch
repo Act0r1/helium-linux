@@ -222,10 +222,10 @@ index 01be335c0..3da8d7c13 100644
        views::kFlexBehaviorKey,
 diff --git a/chrome/browser/ui/views/workspaces/workspace_switcher_view.cc b/chrome/browser/ui/views/workspaces/workspace_switcher_view.cc
 new file mode 100644
-index 000000000..bbc84eaeb
+index 000000000..cedbe502f
 --- /dev/null
 +++ b/chrome/browser/ui/views/workspaces/workspace_switcher_view.cc
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,390 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -273,6 +273,7 @@ index 000000000..bbc84eaeb
 +#include "ui/views/context_menu_controller.h"
 +#include "ui/views/controls/button/label_button.h"
 +#include "ui/views/controls/highlight_path_generator.h"
++#include "ui/views/controls/scroll_view.h"
 +#include "ui/views/layout/flex_layout_types.h"
 +#include "ui/views/layout/flex_layout_view.h"
 +#include "ui/views/view_class_properties.h"
@@ -326,6 +327,41 @@ index 000000000..bbc84eaeb
 +BEGIN_METADATA(WorkspaceChipButton)
 +END_METADATA
 +
++class WorkspaceChipStrip : public views::FlexLayoutView {
++  METADATA_HEADER(WorkspaceChipStrip, views::FlexLayoutView)
++
++ public:
++  WorkspaceChipStrip() {
++    SetOrientation(views::LayoutOrientation::kHorizontal);
++    SetCrossAxisAlignment(views::LayoutAlignment::kCenter);
++    SetInteriorMargin(gfx::Insets::VH(2, 0));
++    SetDefault(views::kMarginsKey, gfx::Insets::VH(0, 2));
++  }
++  WorkspaceChipStrip(const WorkspaceChipStrip&) = delete;
++  WorkspaceChipStrip& operator=(const WorkspaceChipStrip&) = delete;
++  ~WorkspaceChipStrip() override = default;
++
++  void ScrollChildToVisibleOnLayout(size_t index) {
++    scroll_to_index_ = index;
++    InvalidateLayout();
++  }
++
++  void Layout(PassKey) override {
++    LayoutSuperclass<views::FlexLayoutView>(this);
++    const std::optional<size_t> index = scroll_to_index_;
++    scroll_to_index_.reset();
++    if (index && *index < children().size()) {
++      children()[*index]->ScrollViewToVisible();
++    }
++  }
++
++ private:
++  std::optional<size_t> scroll_to_index_;
++};
++
++BEGIN_METADATA(WorkspaceChipStrip)
++END_METADATA
++
 +class WorkspaceSwitcherView : public views::FlexLayoutView,
 +                              public workspaces::WorkspaceController::Observer,
 +                              public TabStripModelObserver,
@@ -335,14 +371,14 @@ index 000000000..bbc84eaeb
 + public:
 +  explicit WorkspaceSwitcherView(BrowserWindowInterface* browser)
 +      : browser_(browser),
-+        editor_bubble_tracker_(
++        state_controller_(
 +            browser ? tabs::VerticalTabStripStateController::From(browser)
-+                    : nullptr) {
++                    : nullptr),
++        editor_bubble_tracker_(state_controller_) {
 +    SetOrientation(views::LayoutOrientation::kHorizontal);
 +    SetCrossAxisAlignment(views::LayoutAlignment::kCenter);
 +    SetMainAxisAlignment(views::LayoutAlignment::kStart);
-+    SetInteriorMargin(gfx::Insets::VH(4, 0));
-+    SetDefault(views::kMarginsKey, gfx::Insets::VH(0, 2));
++    SetInteriorMargin(gfx::Insets::VH(2, 0));
 +    SetProperty(views::kFlexBehaviorKey,
 +                views::FlexSpecification(
 +                    views::MinimumFlexSizeRule::kPreferred,
@@ -351,9 +387,46 @@ index 000000000..bbc84eaeb
 +    GetViewAccessibility().SetName(
 +        l10n_util::GetStringUTF16(IDS_WORKSPACE_SWITCHER_ACCNAME));
 +
++    auto scroll_view = std::make_unique<views::ScrollView>();
++    scroll_view->SetBackgroundColor(std::nullopt);
++    scroll_view->SetUseContentsPreferredSize(true);
++    scroll_view->SetHorizontalScrollBarMode(
++        views::ScrollView::ScrollBarMode::kHiddenButEnabled);
++    scroll_view->SetVerticalScrollBarMode(
++        views::ScrollView::ScrollBarMode::kDisabled);
++    scroll_view->SetTreatAllScrollEventsAsHorizontal(true);
++    scroll_view->SetOverflowGradientMask(
++        views::ScrollView::GradientDirection::kHorizontal);
++    scroll_view->SetProperty(views::kFlexBehaviorKey,
++                             views::FlexSpecification(
++                                 views::MinimumFlexSizeRule::kScaleToZero,
++                                 views::MaximumFlexSizeRule::kPreferred));
++    chips_ = scroll_view->SetContents(std::make_unique<WorkspaceChipStrip>());
++    AddChildView(std::move(scroll_view));
++
++    const std::u16string new_workspace_label =
++        l10n_util::GetStringUTF16(IDS_WORKSPACE_NEW_TOOLTIP);
++    auto add_button = std::make_unique<views::LabelButton>(
++        base::BindRepeating(&WorkspaceSwitcherView::CreateNewWorkspace,
++                            weak_factory_.GetWeakPtr()),
++        u"+");
++    ConfigureChip(add_button.get());
++    add_button->SetTooltipText(new_workspace_label);
++    add_button->SetAccessibleName(new_workspace_label);
++    add_button->SetProperty(views::kMarginsKey, gfx::Insets::VH(0, 2));
++    add_button_ = AddChildView(std::move(add_button));
++
 +    bubble_closed_subscription_ =
 +        editor_bubble_tracker_.RegisterOnBubbleClosed(base::BindRepeating(
 +            &WorkspaceSwitcherView::ScheduleRebuild, base::Unretained(this)));
++    if (state_controller_) {
++      collapsed_ = state_controller_->GetCollapseState() !=
++                   tabs::VerticalTabStripCollapseState::kExpanded;
++      collapse_changed_subscription_ =
++          state_controller_->RegisterOnCollapseChanged(base::BindRepeating(
++              &WorkspaceSwitcherView::OnCollapseChanged,
++              base::Unretained(this)));
++    }
 +
 +    if (browser_) {
 +      controller_ = workspaces::WorkspaceController::From(browser_);
@@ -417,6 +490,11 @@ index 000000000..bbc84eaeb
 +        kStopContextMenuPropagation));
 +  }
 +
++  void OnCollapseChanged(tabs::VerticalTabStripCollapseState state) {
++    collapsed_ = state != tabs::VerticalTabStripCollapseState::kExpanded;
++    ScheduleRebuild();
++  }
++
 +  void ScheduleRebuild() {
 +    if (rebuild_scheduled_) {
 +      return;
@@ -433,7 +511,7 @@ index 000000000..bbc84eaeb
 +      return;
 +    }
 +
-+    RemoveAllChildViews();
++    chips_->RemoveAllChildViews();
 +    if (!controller_ || !browser_) {
 +      SetVisible(false);
 +      SetPreferredSize(gfx::Size());
@@ -442,13 +520,17 @@ index 000000000..bbc84eaeb
 +
 +    SetVisible(true);
 +    SetPreferredSize(std::nullopt);
++    SetMainAxisAlignment(collapsed_ ? views::LayoutAlignment::kCenter
++                                    : views::LayoutAlignment::kStart);
++    add_button_->SetVisible(!collapsed_);
 +
 +    TabStripModel* model = browser_->GetTabStripModel();
 +    TabGroupModel* groups = model->group_model();
 +    const std::optional<tab_groups::TabGroupId> active =
 +        controller_->GetActiveWorkspace();
 +    for (const tab_groups::TabGroupId& group_id : controller_->GetWorkspaces()) {
-+      if (!groups || !groups->ContainsTabGroup(group_id)) {
++      if (!groups || !groups->ContainsTabGroup(group_id) ||
++          (collapsed_ && active != group_id)) {
 +        continue;
 +      }
 +      const tab_groups::TabGroupVisualData* visuals =
@@ -464,19 +546,11 @@ index 000000000..bbc84eaeb
 +          l10n_util::GetStringFUTF16(IDS_WORKSPACE_ITEM_ACCNAME, title));
 +      chip->set_context_menu_controller(this);
 +      ApplyChipBackground(chip.get(), visuals->color(), active == group_id);
-+      AddChildView(std::move(chip));
++      chips_->AddChildView(std::move(chip));
++      if (active == group_id) {
++        chips_->ScrollChildToVisibleOnLayout(chips_->children().size() - 1);
++      }
 +    }
-+
-+    const std::u16string new_workspace_label =
-+        l10n_util::GetStringUTF16(IDS_WORKSPACE_NEW_TOOLTIP);
-+    auto add_button = std::make_unique<views::LabelButton>(
-+        base::BindRepeating(&WorkspaceSwitcherView::CreateNewWorkspace,
-+                            weak_factory_.GetWeakPtr()),
-+        u"+");
-+    ConfigureChip(add_button.get());
-+    add_button->SetTooltipText(new_workspace_label);
-+    add_button->SetAccessibleName(new_workspace_label);
-+    AddChildView(std::move(add_button));
 +    InvalidateLayout();
 +  }
 +
@@ -514,12 +588,17 @@ index 000000000..bbc84eaeb
 +  }
 +
 +  const raw_ptr<BrowserWindowInterface> browser_;
++  const raw_ptr<tabs::VerticalTabStripStateController> state_controller_;
 +  raw_ptr<workspaces::WorkspaceController> controller_ = nullptr;
++  raw_ptr<WorkspaceChipStrip> chips_ = nullptr;
++  raw_ptr<views::LabelButton> add_button_ = nullptr;
 +  TabGroupEditorBubbleTracker editor_bubble_tracker_;
 +  base::CallbackListSubscription bubble_closed_subscription_;
++  base::CallbackListSubscription collapse_changed_subscription_;
 +  base::ScopedObservation<workspaces::WorkspaceController,
 +                          workspaces::WorkspaceController::Observer>
 +      controller_observation_{this};
++  bool collapsed_ = false;
 +  bool rebuild_scheduled_ = false;
 +  base::WeakPtrFactory<WorkspaceSwitcherView> weak_factory_{this};
 +};
