@@ -133,6 +133,58 @@ index 1767160a0..6680ca19b 100644
    base::ScopedObservation<views::Widget, views::WidgetObserver>
        widget_observation_{this};
  };
+diff --git a/chrome/browser/ui/views/tabs/groups/tab_group_editor_bubble_view.cc b/chrome/browser/ui/views/tabs/groups/tab_group_editor_bubble_view.cc
+index d385100cc..ba35cfd56 100644
+--- a/chrome/browser/ui/views/tabs/groups/tab_group_editor_bubble_view.cc
++++ b/chrome/browser/ui/views/tabs/groups/tab_group_editor_bubble_view.cc
+@@ -65,6 +65,7 @@
+ #include "chrome/browser/ui/views/tabs/groups/recent_activity_bubble_dialog_view.h"
+ #include "chrome/browser/ui/views/tabs/tab_strip.h"
+ #include "chrome/browser/ui/views/toolbar/toolbar_ink_drop_util.h"
++#include "chrome/browser/ui/workspaces/workspace_controller.h"
+ #include "chrome/common/url_constants.h"
+ #include "chrome/grit/generated_resources.h"
+ #include "components/bookmarks/common/bookmark_pref_names.h"
+@@ -579,6 +580,9 @@ void TabGroupEditorBubbleView::RebuildMenuContents() {
+   color_selector_ = AddChildView(BuildColorPicker());
+   AddChildView(BuildSeparator());
+ 
++  const bool is_workspace =
++      workspaces::WorkspaceController::From(browser_) != nullptr;
++
+   if (!CanSaveGroups()) {
+     simple_menu_items_.push_back(AddChildView(BuildNewTabInGroupButton()));
+     if (base::FeatureList::IsEnabled(tabs::kTabGroupHome)) {
+@@ -598,7 +602,9 @@ void TabGroupEditorBubbleView::RebuildMenuContents() {
+       simple_menu_items_.push_back(AddChildView(BuildAskGeminiButton()));
+     }
+     AddChildView(BuildSeparator());
+-    simple_menu_items_.push_back(AddChildView(BuildUngroupButton()));
++    if (!is_workspace) {
++      simple_menu_items_.push_back(AddChildView(BuildUngroupButton()));
++    }
+     simple_menu_items_.push_back(AddChildView(BuildCloseGroupButton()));
+   } else {
+     simple_menu_items_.push_back(AddChildView(BuildNewTabInGroupButton()));
+@@ -631,14 +637,16 @@ void TabGroupEditorBubbleView::RebuildMenuContents() {
+       simple_menu_items_.push_back(AddChildView(BuildRecentActivityButton()));
+     }
+ 
+-    simple_menu_items_.push_back(AddChildView(BuildCloseGroupButton()));
++    if (!is_workspace) {
++      simple_menu_items_.push_back(AddChildView(BuildCloseGroupButton()));
++    }
+     if (base::FeatureList::IsEnabled(features::kGlicTabGroups)) {
+       AddChildView(BuildSeparator());
+       simple_menu_items_.push_back(AddChildView(BuildAskGeminiButton()));
+     }
+     AddChildView(BuildSeparator());
+ 
+-    if (!IsGroupShared()) {
++    if (!IsGroupShared() && !is_workspace) {
+       simple_menu_items_.push_back(AddChildView(BuildUngroupButton()));
+     }
+ 
 diff --git a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
 index 01be335c0..3da8d7c13 100644
 --- a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc

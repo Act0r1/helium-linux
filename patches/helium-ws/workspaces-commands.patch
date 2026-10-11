@@ -198,7 +198,7 @@ index 62ba0f24c..5ba568ee9 100644
  #if BUILDFLAG(IS_CHROMEOS)
  #define CHROME_PLATFORM_SPECIFIC_ACTION_IDS \
 diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
-index 194dae8fb..da27efe80 100644
+index 194dae8fb..1ccd914b6 100644
 --- a/chrome/browser/ui/browser_command_controller.cc
 +++ b/chrome/browser/ui/browser_command_controller.cc
 @@ -20,6 +20,7 @@
@@ -230,7 +230,7 @@ index 194dae8fb..da27efe80 100644
  
    // Bookmark editing commands depend on the bookmark model to be loaded.
    // Schedule a callback to update them once the model is loaded instead of just
-@@ -555,7 +563,19 @@ bool BrowserCommandController::IsReservedCommandOrKey(
+@@ -555,7 +563,10 @@ bool BrowserCommandController::IsReservedCommandOrKey(
           command_id == IDC_SELECT_NEXT_TAB ||
           command_id == IDC_SELECT_PREVIOUS_TAB ||
           command_id == IDC_CYCLE_TO_NEXT_TAB ||
@@ -238,20 +238,11 @@ index 194dae8fb..da27efe80 100644
 +         command_id == IDC_CYCLE_TO_PREV_TAB ||
 +         command_id == IDC_ACTIVATE_NEXT_WORKSPACE ||
 +         command_id == IDC_ACTIVATE_PREVIOUS_WORKSPACE ||
-+         command_id == IDC_ACTIVATE_WORKSPACE_0 ||
-+         command_id == IDC_ACTIVATE_WORKSPACE_1 ||
-+         command_id == IDC_ACTIVATE_WORKSPACE_2 ||
-+         command_id == IDC_ACTIVATE_WORKSPACE_3 ||
-+         command_id == IDC_ACTIVATE_WORKSPACE_4 ||
-+         command_id == IDC_ACTIVATE_WORKSPACE_5 ||
-+         command_id == IDC_ACTIVATE_WORKSPACE_6 ||
-+         command_id == IDC_ACTIVATE_WORKSPACE_7 ||
-+         command_id == IDC_ACTIVATE_WORKSPACE_8 ||
-+         command_id == IDC_NEW_WORKSPACE || command_id == IDC_EXIT ||
++         command_id == IDC_EXIT ||
           command_id == IDC_COPY_OR_INSPECT_SHORTCUT || command_id == IDC_DEV_TOOLS ||
           command_id == IDC_DEV_TOOLS_TOGGLE || command_id == IDC_TAB_SEARCH;
  }
-@@ -853,6 +873,26 @@ void BrowserCommandController::HandleCommandWithDisposition(
+@@ -853,6 +864,26 @@ void BrowserCommandController::HandleCommandWithDisposition(
            TabStripUserGestureDetails(
                TabStripUserGestureDetails::GestureType::kKeyboard, time_stamp));
        break;
@@ -278,7 +269,7 @@ index 194dae8fb..da27efe80 100644
      case IDC_DUPLICATE_TAB:
        DuplicateTab(browser_);
        break;
-@@ -2070,6 +2110,7 @@ void BrowserCommandController::InitCommandState() {
+@@ -2070,6 +2101,7 @@ void BrowserCommandController::InitCommandState() {
    command_updater_->UpdateCommandEnabled(IDC_SELECT_TAB_7, supports_tabs);
    command_updater_->UpdateCommandEnabled(IDC_SELECT_LAST_TAB, supports_tabs);
    command_updater_->UpdateCommandEnabled(IDC_NEW_TAB_TO_RIGHT, supports_tabs);
@@ -286,7 +277,7 @@ index 194dae8fb..da27efe80 100644
    command_updater_->UpdateCommandEnabled(IDC_TAB_SCROLL_BUTTONS_TOGGLE_PIN,
                                           supports_tabs);
  
-@@ -2861,10 +2902,30 @@ void BrowserCommandController::UpdateCommandsForTabStripStateChanged() {
+@@ -2861,10 +2893,30 @@ void BrowserCommandController::UpdateCommandsForTabStripStateChanged() {
        browser_->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL);
    command_updater_->UpdateCommandEnabled(IDC_GROUP_UNGROUPED_TABS,
                                           CanGroupAllUngroupedTabs(browser_));

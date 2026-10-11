@@ -562,10 +562,10 @@ index 47f4f372e..874fa65c7 100644
    registry->RegisterBooleanPref(prefs::kHeliumZenModeSidebarPinned, false);
 diff --git a/chrome/browser/ui/workspaces/workspace_controller.cc b/chrome/browser/ui/workspaces/workspace_controller.cc
 new file mode 100644
-index 000000000..8b7e20c1f
+index 000000000..19bc7d423
 --- /dev/null
 +++ b/chrome/browser/ui/workspaces/workspace_controller.cc
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,392 @@
 +#include "chrome/browser/ui/workspaces/workspace_controller.h"
 +
 +#include <algorithm>
@@ -713,6 +713,7 @@ index 000000000..8b7e20c1f
 +    const std::u16string& title) {
 +  base::AutoReset<bool> updating(&updating_, true);
 +  model_->delegate()->AddTabAt(GURL(), -1, true);
++  model_->ForgetOpener(model_->GetActiveWebContents());
 +  const auto id = model_->AddToNewGroup({model_->active_index()});
 +  const auto color =
 +      model_->group_model()->GetTabGroup(id)->visual_data()->color();
@@ -868,6 +869,7 @@ index 000000000..8b7e20c1f
 +  if (!model_) {
 +    return;
 +  }
++  base::AutoReset<bool> updating(&updating_, true);
 +  const auto active = GetActiveWorkspace();
 +  auto* state = tabs::VerticalTabStripStateController::From(browser_);
 +  const bool vertical = state && state->ShouldDisplayVerticalTabs();
@@ -922,6 +924,10 @@ index 000000000..8b7e20c1f
 +  if (tab == model_->GetActiveTab() && new_group) {
 +    last_active_group_ = new_group;
 +  }
++  if (old_group && new_group && old_group != new_group &&
++      model_->GetIndexOfTab(tab) != TabStripModel::kNoTab) {
++    model_->ForgetOpener(tab->GetContents());
++  }
 +  ScheduleUpdate();
 +}
 +
@@ -931,6 +937,18 @@ index 000000000..8b7e20c1f
 +}
 +
 +void WorkspaceController::OnTabGroupChanged(const TabGroupChange& change) {
++  if (!updating_ && change.type == TabGroupChange::kVisualsChanged &&
++      !SessionRestore::IsRestoring(browser_->GetProfile())) {
++    const auto* visuals = change.GetVisualsChange();
++    if (visuals->old_visuals->is_collapsed() &&
++        !visuals->new_visuals->is_collapsed() &&
++        change.group != GetActiveWorkspace()) {
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(&WorkspaceController::ActivateWorkspace,
++                                    weak_factory_.GetWeakPtr(), change.group));
++      return;
++    }
++  }
 +  ScheduleUpdate();
 +}
 +
