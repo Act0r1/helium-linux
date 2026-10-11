@@ -226,9 +226,9 @@ index 000000000..cedbe502f
 --- /dev/null
 +++ b/chrome/browser/ui/views/workspaces/workspace_switcher_view.cc
 @@ -0,0 +1,390 @@
-+// Copyright 2026 The Chromium Authors
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in the LICENSE file.
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
 +
 +#include "chrome/browser/ui/views/workspaces/workspace_switcher_view.h"
 +
@@ -622,9 +622,9 @@ index 000000000..9252144ba
 --- /dev/null
 +++ b/chrome/browser/ui/views/workspaces/workspace_switcher_view.h
 @@ -0,0 +1,21 @@
-+// Copyright 2026 The Chromium Authors
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in the LICENSE file.
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
 +
 +#ifndef CHROME_BROWSER_UI_VIEWS_WORKSPACES_WORKSPACE_SWITCHER_VIEW_H_
 +#define CHROME_BROWSER_UI_VIEWS_WORKSPACES_WORKSPACE_SWITCHER_VIEW_H_

@@ -565,7 +565,11 @@ new file mode 100644
 index 000000000..19bc7d423
 --- /dev/null
 +++ b/chrome/browser/ui/workspaces/workspace_controller.cc
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,396 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
 +#include "chrome/browser/ui/workspaces/workspace_controller.h"
 +
 +#include <algorithm>
@@ -963,7 +967,11 @@ new file mode 100644
 index 000000000..196aa8446
 --- /dev/null
 +++ b/chrome/browser/ui/workspaces/workspace_controller.h
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,104 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
 +#ifndef CHROME_BROWSER_UI_WORKSPACES_WORKSPACE_CONTROLLER_H_
 +#define CHROME_BROWSER_UI_WORKSPACES_WORKSPACE_CONTROLLER_H_
 +
@@ -1069,7 +1077,11 @@ new file mode 100644
 index 000000000..9ae65534d
 --- /dev/null
 +++ b/chrome/browser/ui/workspaces/workspace_controller_unittest.cc
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,214 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
 +#include "chrome/browser/ui/workspaces/workspace_controller.h"
 +
 +#include "base/run_loop.h"

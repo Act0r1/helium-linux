@@ -326,15 +326,7 @@ diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_c
 index f3e2cd639..4e09a9fed 100644
 --- a/chrome/browser/ui/browser_commands.cc
 +++ b/chrome/browser/ui/browser_commands.cc
-@@ -16,6 +16,7 @@
- #include "base/check_deref.h"
- #include "base/command_line.h"
- #include "base/containers/adapters.h"
-+#include "base/containers/contains.h"
- #include "base/feature_list.h"
- #include "base/i18n/rtl.h"
- #include "base/memory/scoped_refptr.h"
-@@ -128,6 +129,7 @@
+@@ -128,6 +128,7 @@
  #include "chrome/browser/ui/web_applications/web_app_tabbed_utils.h"
  #include "chrome/browser/ui/webui/tab_search/tab_search.mojom.h"
  #include "chrome/browser/ui/window_feature_controller/window_feature_controller.h"
@@ -342,7 +334,7 @@ index f3e2cd639..4e09a9fed 100644
  #include "chrome/browser/upgrade_detector/upgrade_detector.h"
  #include "chrome/browser/web_applications/web_app_constants.h"
  #include "chrome/browser/web_applications/web_app_helpers.h"
-@@ -538,6 +540,24 @@ struct MruTabResult {
+@@ -538,6 +539,24 @@ struct MruTabResult {
    int index;
  };
  
@@ -367,7 +359,7 @@ index f3e2cd639..4e09a9fed 100644
  std::optional<MruTabResult> GetGlobalMruTab(
      BrowserCollection* collection,
      BrowserWindowInterface* active_browser) {
-@@ -548,11 +568,20 @@ std::optional<MruTabResult> GetGlobalMruTab(
+@@ -548,11 +567,20 @@ std::optional<MruTabResult> GetGlobalMruTab(
    collection->ForEach(
        [&](BrowserWindowInterface* b) {
          TabStripModel* model = b->GetTabStripModel();
@@ -382,13 +374,13 @@ index f3e2cd639..4e09a9fed 100644
            if (b == active_browser && i == model->active_index()) {
              continue;
            }
-+          if (controller && !base::Contains(visible_tabs, *it)) {
++          if (controller && !std::ranges::contains(visible_tabs, *it)) {
 +            continue;
 +          }
            content::WebContents* contents = (*it)->GetContents();
            auto* lifecycle_unit =
                resource_coordinator::TabLifecycleUnitExternal::FromWebContents(
-@@ -1565,13 +1594,23 @@ bool CanResetZoom(content::WebContents* contents) {
+@@ -1565,13 +1593,23 @@ bool CanResetZoom(content::WebContents* contents) {
  void SelectNextTab(BrowserWindowInterface* browser,
                     TabStripUserGestureDetails gesture_detail) {
    base::RecordAction(UserMetricsAction("SelectNextTab"));
@@ -414,7 +406,7 @@ index f3e2cd639..4e09a9fed 100644
  }
  
  bool IsCtrlTabMruEnabled(BrowserWindowInterface* browser) {
-@@ -1608,8 +1647,13 @@ void SelectNumberedTab(BrowserWindowInterface* browser,
+@@ -1608,8 +1646,13 @@ void SelectNumberedTab(BrowserWindowInterface* browser,
    TabStripModel* model = browser->GetTabStripModel();
    std::optional<tab_groups::TabGroupId> focused_group =
        model->GetFocusedGroup();
@@ -428,7 +420,7 @@ index f3e2cd639..4e09a9fed 100644
      if (!IsTabSelectable(model, tab, focused_group)) {
        continue;
      }
-@@ -1628,7 +1672,12 @@ void SelectLastTab(BrowserWindowInterface* browser,
+@@ -1628,7 +1671,12 @@ void SelectLastTab(BrowserWindowInterface* browser,
    TabStripModel* model = browser->GetTabStripModel();
    std::optional<tab_groups::TabGroupId> focused_group =
        model->GetFocusedGroup();
@@ -441,7 +433,7 @@ index f3e2cd639..4e09a9fed 100644
      if (!IsTabSelectable(model, tab, focused_group)) {
        continue;
      }
-@@ -1639,6 +1688,30 @@ void SelectLastTab(BrowserWindowInterface* browser,
+@@ -1639,6 +1687,30 @@ void SelectLastTab(BrowserWindowInterface* browser,
    }
  }
  
