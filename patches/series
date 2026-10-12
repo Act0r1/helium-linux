@@ -8,10 +8,4 @@ helium/linux/use-default-theme.patch
 helium/linux/add-middle-click-paste-flag.patch
 helium/linux/add-error-for-missing-desktop-file.patch
 helium/linux/disable-tab-strokes.patch
-helium-ws/enable-password-saving-by-default.patch
-helium-ws/re-enable-password-manager.patch
-helium-ws/workspaces-strings.patch
-helium-ws/workspaces-core.patch
-helium-ws/workspaces-vertical-ui.patch
-helium-ws/workspaces-commands.patch
 helium-ws/argon-branding.patch
