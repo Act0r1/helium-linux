@@ -1,0 +1,22 @@
+diff --git a/chrome/app/theme/chromium/BRANDING b/chrome/app/theme/chromium/BRANDING
+index a486e9bc5..0a1ae93a2 100644
+--- a/chrome/app/theme/chromium/BRANDING
++++ b/chrome/app/theme/chromium/BRANDING
+@@ -1,10 +1,10 @@
+-COMPANY_FULLNAME=The Helium Authors
+-COMPANY_SHORTNAME=The Helium Authors
+-PRODUCT_FULLNAME=Helium
+-PRODUCT_SHORTNAME=Helium
+-PRODUCT_INSTALLER_FULLNAME=Helium Installer
+-PRODUCT_INSTALLER_SHORTNAME=Helium Installer
+-COPYRIGHT=Copyright @LASTCHANGE_YEAR@ The Helium Authors. All rights reserved.
++COMPANY_FULLNAME=The Argon Authors
++COMPANY_SHORTNAME=The Argon Authors
++PRODUCT_FULLNAME=Argon
++PRODUCT_SHORTNAME=Argon
++PRODUCT_INSTALLER_FULLNAME=Argon Installer
++PRODUCT_INSTALLER_SHORTNAME=Argon Installer
++COPYRIGHT=Copyright @LASTCHANGE_YEAR@ The Argon Authors. All rights reserved.
+ MAC_BUNDLE_ID=net.imput.helium
+ MAC_CREATOR_CODE=Cr24
+ MAC_TEAM_ID=S4Q33XPHB4
