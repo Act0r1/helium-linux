@@ -323,7 +323,7 @@ index dbb376235..1a7f7943b 100644
    void UpdateCommandsForEnableGlicChanged();
  
 diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_commands.cc
-index f3e2cd639..4e09a9fed 100644
+index f3e2cd639..f728ccfee 100644
 --- a/chrome/browser/ui/browser_commands.cc
 +++ b/chrome/browser/ui/browser_commands.cc
 @@ -128,6 +128,7 @@
