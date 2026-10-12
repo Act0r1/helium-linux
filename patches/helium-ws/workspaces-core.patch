@@ -195,7 +195,7 @@ index de584514f..6ae002733 100644
    return extra_data;
  }
 diff --git a/chrome/browser/ui/browser_tab_strip_model_delegate.cc b/chrome/browser/ui/browser_tab_strip_model_delegate.cc
-index e4bd28dec..d6a3178ac 100644
+index e4bd28dec..fe33c7eb9 100644
 --- a/chrome/browser/ui/browser_tab_strip_model_delegate.cc
 +++ b/chrome/browser/ui/browser_tab_strip_model_delegate.cc
 @@ -44,6 +44,7 @@
@@ -206,7 +206,7 @@ index e4bd28dec..d6a3178ac 100644
  #include "chrome/common/chrome_switches.h"
  #include "components/contextual_tasks/public/features.h"
  #include "components/feature_engagement/public/feature_constants.h"
-@@ -428,6 +429,12 @@ void BrowserTabStripModelDelegate::OnRemovingAllTabsFromGroups(
+@@ -428,6 +429,30 @@ void BrowserTabStripModelDelegate::OnRemovingAllTabsFromGroups(
            std::move(callback)));
  }
  
@@ -216,18 +216,40 @@ index e4bd28dec..d6a3178ac 100644
 +  return controller && !controller->IsTabVisible(tab);
 +}
 +
++bool BrowserTabStripModelDelegate::SupportsEssentials() const {
++  return workspaces::WorkspaceController::From(browser_) != nullptr;
++}
++
++bool BrowserTabStripModelDelegate::IsTabEssential(
++    const tabs::TabInterface* tab) const {
++  const auto* controller = workspaces::WorkspaceController::From(browser_);
++  return controller && controller->IsEssential(tab);
++}
++
++void BrowserTabStripModelDelegate::SetTabsEssential(
++    const std::vector<tabs::TabInterface*>& tabs,
++    bool essential) {
++  if (auto* controller = workspaces::WorkspaceController::From(browser_)) {
++    controller->SetEssential(tabs, essential);
++  }
++}
++
  void BrowserTabStripModelDelegate::CloseTab(
      const tabs::TabInterface* tab_interface,
      CloseTabSource source,
 diff --git a/chrome/browser/ui/browser_tab_strip_model_delegate.h b/chrome/browser/ui/browser_tab_strip_model_delegate.h
-index 36c725ea3..f96334f20 100644
+index 36c725ea3..539bca70b 100644
 --- a/chrome/browser/ui/browser_tab_strip_model_delegate.h
 +++ b/chrome/browser/ui/browser_tab_strip_model_delegate.h
-@@ -93,6 +93,7 @@ class BrowserTabStripModelDelegate : public TabStripModelDelegate {
+@@ -93,6 +93,11 @@ class BrowserTabStripModelDelegate : public TabStripModelDelegate {
    void OnRemovingAllTabsFromGroups(
        const std::vector<tab_groups::TabGroupId>& group_ids,
        base::OnceCallback<void()> callback) override;
 +  bool IsTabHiddenByWorkspace(const tabs::TabInterface* tab) const override;
++  bool SupportsEssentials() const override;
++  bool IsTabEssential(const tabs::TabInterface* tab) const override;
++  void SetTabsEssential(const std::vector<tabs::TabInterface*>& tabs,
++                        bool essential) override;
    void GlicUnpinTabsFromAllConversations(
        base::span<const tabs::TabHandle> tab_handles) override;
    void CloseTab(const tabs::TabInterface* tab,
@@ -375,8 +397,27 @@ index 6ecba965f..d3dad081c 100644
  #if BUILDFLAG(IS_CHROMEOS)
    // If set, the browser should be created on the display given by
    // `display_id`.
+diff --git a/chrome/browser/ui/tabs/tab_menu_model.cc b/chrome/browser/ui/tabs/tab_menu_model.cc
+index 8ea664d6e..c0026e89d 100644
+--- a/chrome/browser/ui/tabs/tab_menu_model.cc
++++ b/chrome/browser/ui/tabs/tab_menu_model.cc
+@@ -522,6 +522,14 @@ void TabMenuModel::Build(int index) {
+             ui::kColorMenuIcon, ui::SimpleMenuModel::kDefaultIconSize));
+   }
+ 
++  if (tab_strip_->delegate()->SupportsEssentials()) {
++    AddItemWithStringId(TabStripModel::CommandToggleEssential,
++                        tab_strip_->delegate()->IsTabEssential(
++                            tab_strip_->GetTabAtIndex(index))
++                            ? IDS_TAB_CXMENU_REMOVE_FROM_ESSENTIALS
++                            : IDS_TAB_CXMENU_ADD_TO_ESSENTIALS);
++  }
++
+   const bool will_mute_tab = tab_strip_->WillContextMenuMuteTabs(index);
+   AddItem(TabStripModel::CommandToggleTabMuted,
+           l10n_util::GetPluralStringFUTF16(
 diff --git a/chrome/browser/ui/tabs/tab_strip_model.cc b/chrome/browser/ui/tabs/tab_strip_model.cc
-index b7677a9f5..c598a4ad0 100644
+index b7677a9f5..39f45cd40 100644
 --- a/chrome/browser/ui/tabs/tab_strip_model.cc
 +++ b/chrome/browser/ui/tabs/tab_strip_model.cc
 @@ -1677,12 +1677,18 @@ void TabStripModel::ExtendSelectionTo(int index) {
@@ -415,7 +456,34 @@ index b7677a9f5..c598a4ad0 100644
  void TabStripModel::SelectLastTab(TabStripUserGestureDetails detail) {
    if (!empty()) {
      ActivateTab(*rbegin(), detail);
-@@ -3658,8 +3674,9 @@ std::optional<int> TabStripModel::GetNextExpandedActiveTab(
+@@ -2778,6 +2794,9 @@ bool TabStripModel::IsContextMenuCommandEnabled(
+ 
+     case CommandToggleVertical:
+       return true;
++
++    case CommandToggleEssential:
++      return delegate_->SupportsEssentials();
+   }
+   SCOPED_CRASH_KEY_NUMBER("TabStripModel", "command_id", command_id);
+   NOTREACHED() << "Unsupported command: " << command_id;
+@@ -2995,6 +3014,16 @@ void TabStripModel::ExecuteContextMenuCommand(int context_index,
+       break;
+     }
+ 
++    case CommandToggleEssential: {
++      ReentrancyCheck reentrancy_check(&reentrancy_guard_);
++      const std::vector<int> indices = GetIndicesForCommand(context_index);
++      const bool essential =
++          !delegate_->IsTabEssential(GetTabAtIndex(context_index));
++      delegate_->SetTabsEssential(GetTabsAtIndices(indices), essential);
++      SetTabsPinned(indices, essential);
++      break;
++    }
++
+     case CommandToggleTabMuted: {
+       const bool mute = WillContextMenuMuteTabs(context_index);
+       for (int index : GetIndicesForCommand(context_index)) {
+@@ -3658,8 +3687,9 @@ std::optional<int> TabStripModel::GetNextExpandedActiveTab(
           ++it, ++current_index) {
        tabs::TabInterface* tab = *it;
        std::optional<tab_groups::TabGroupId> current_group = tab->GetGroup();
@@ -427,7 +495,7 @@ index b7677a9f5..c598a4ad0 100644
          return current_index;
        }
      }
-@@ -3672,8 +3689,9 @@ std::optional<int> TabStripModel::GetNextExpandedActiveTab(
+@@ -3672,8 +3702,9 @@ std::optional<int> TabStripModel::GetNextExpandedActiveTab(
           ++it, --current_index) {
        tabs::TabInterface* tab = *it;
        std::optional<tab_groups::TabGroupId> current_group = tab->GetGroup();
@@ -439,7 +507,7 @@ index b7677a9f5..c598a4ad0 100644
          return current_index;
        }
      }
-@@ -3842,6 +3860,9 @@ std::vector<int> TabStripModel::GetIndicesClosedByCommand(
+@@ -3842,6 +3873,9 @@ std::vector<int> TabStripModel::GetIndicesClosedByCommand(
      if (focused_group.has_value() && GetTabGroupForTab(i) != focused_group) {
        continue;
      }
@@ -449,7 +517,7 @@ index b7677a9f5..c598a4ad0 100644
      if (!indices_to_exclude.Contains(gfx::Range(i, i + 1)) && !IsTabPinned(i) &&
          (!is_selected || !IsTabSelected(i))) {
        indices.push_back(i);
-@@ -3880,6 +3901,10 @@ std::vector<tabs::TabInterface*> TabStripModel::GetTabsClosedByCommand(
+@@ -3880,6 +3914,10 @@ std::vector<tabs::TabInterface*> TabStripModel::GetTabsClosedByCommand(
        continue;
      }
  
@@ -460,7 +528,7 @@ index b7677a9f5..c598a4ad0 100644
      if (tab == invoked_tab || tab->IsPinned()) {
        if (id == CommandCloseTabsToLeft && tab == invoked_tab) {
          break;
-@@ -4375,20 +4400,26 @@ TabStripSelectionChange TabStripModel::SetSelection(
+@@ -4375,20 +4413,26 @@ TabStripSelectionChange TabStripModel::SetSelection(
  }
  
  void TabStripModel::SelectRelativeTabCycle(TabRelativeDirection direction,
@@ -491,7 +559,7 @@ index b7677a9f5..c598a4ad0 100644
      BrowserWindowInterface* browser =
          GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
            GetWebContentsAt(0));
-@@ -4396,8 +4427,19 @@ void TabStripModel::SelectMRUTab(TabRelativeDirection direction,
+@@ -4396,8 +4440,19 @@ void TabStripModel::SelectMRUTab(TabRelativeDirection direction,
        return;
      }
  
@@ -513,7 +581,7 @@ index b7677a9f5..c598a4ad0 100644
      }
  
      std::sort(mru_cycle_list_.begin(), mru_cycle_list_.end(),
-@@ -4428,7 +4470,57 @@ void TabStripModel::StopMRUCycling() {
+@@ -4428,7 +4483,57 @@ void TabStripModel::StopMRUCycling() {
  }
  
  void TabStripModel::SelectRelativeTab(TabRelativeDirection direction,
@@ -572,7 +640,7 @@ index b7677a9f5..c598a4ad0 100644
    // This may happen during automated testing or if a user somehow buffers
    // many key accelerators.
    if (empty()) {
-@@ -6007,11 +6099,15 @@ std::optional<int> TabStripModel::DetermineNewSelectedIndex(
+@@ -6007,11 +6112,15 @@ std::optional<int> TabStripModel::DetermineNewSelectedIndex(
    }
  
    gfx::Range block_tabs = gfx::Range(start_index, start_index + block_size);
@@ -589,7 +657,7 @@ index b7677a9f5..c598a4ad0 100644
      return GetTabIndexAfterClosing(new_selected_index, block_tabs);
    }
  
-@@ -6019,7 +6115,7 @@ std::optional<int> TabStripModel::DetermineNewSelectedIndex(
+@@ -6019,7 +6128,7 @@ std::optional<int> TabStripModel::DetermineNewSelectedIndex(
    new_selected_index = GetIndexOfNextWebContentsOpenedByOpenerOf(block_tabs);
  
    if (new_selected_index != TabStripModel::kNoTab &&
@@ -598,7 +666,7 @@ index b7677a9f5..c598a4ad0 100644
      return GetTabIndexAfterClosing(new_selected_index, block_tabs);
    }
  
-@@ -6029,7 +6125,7 @@ std::optional<int> TabStripModel::DetermineNewSelectedIndex(
+@@ -6029,7 +6138,7 @@ std::optional<int> TabStripModel::DetermineNewSelectedIndex(
      int opener_index = opener ? GetIndexOfTab(opener) : TabStripModel::kNoTab;
      if (opener_index != TabStripModel::kNoTab &&
          !block_tabs.Contains(gfx::Range(opener_index)) &&
@@ -656,10 +724,10 @@ index 9236b46a6..886440647 100644
    // Moves the active tab (or its split if it is in one) into the next slot
    // (kNext), or the previous slot (kPrevious). Respects group boundaries and
 diff --git a/chrome/browser/ui/tabs/tab_strip_model_delegate.h b/chrome/browser/ui/tabs/tab_strip_model_delegate.h
-index 0967577fa..81606cd5c 100644
+index 0967577fa..38c35ab0a 100644
 --- a/chrome/browser/ui/tabs/tab_strip_model_delegate.h
 +++ b/chrome/browser/ui/tabs/tab_strip_model_delegate.h
-@@ -235,6 +235,11 @@ class TabStripModelDelegate {
+@@ -235,6 +235,24 @@ class TabStripModelDelegate {
        const std::vector<tab_groups::TabGroupId>& group_ids,
        base::OnceCallback<void()> callback) = 0;
  
@@ -667,6 +735,19 @@ index 0967577fa..81606cd5c 100644
 +  virtual bool IsTabHiddenByWorkspace(const tabs::TabInterface* tab) const {
 +    return false;
 +  }
++
++  // Returns true if tabs can be made Essentials, pinned in every workspace.
++  virtual bool SupportsEssentials() const { return false; }
++
++  // Returns true if `tab` is an Essential.
++  virtual bool IsTabEssential(const tabs::TabInterface* tab) const {
++    return false;
++  }
++
++  // Marks `tabs` as Essentials, or returns them to the active workspace. The
++  // caller changes their pinned state.
++  virtual void SetTabsEssential(const std::vector<tabs::TabInterface*>& tabs,
++                                bool essential) {}
 +
    // Glic related delegation (see GlicKeyedService and GlicSharingManager).
    // Note: 'Pinning' in Glic is a distinct notion.
@@ -688,10 +769,10 @@ index 47f4f372e..874fa65c7 100644
    registry->RegisterBooleanPref(prefs::kHeliumZenModeSidebarPinned, false);
 diff --git a/chrome/browser/ui/workspaces/workspace_controller.cc b/chrome/browser/ui/workspaces/workspace_controller.cc
 new file mode 100644
-index 000000000..47a16fd35
+index 000000000..f86806c78
 --- /dev/null
 +++ b/chrome/browser/ui/workspaces/workspace_controller.cc
-@@ -0,0 +1,595 @@
+@@ -0,0 +1,632 @@
 +// Copyright 2026 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -741,9 +822,40 @@ index 000000000..47a16fd35
 +constexpr char kNameKey[] = "name";
 +constexpr char kIconKey[] = "icon";
 +constexpr char kColorKey[] = "color";
++constexpr char kEssentialsId[] = "essentials";
 +
 +std::string NewId() {
 +  return base::Uuid::GenerateRandomV4().AsLowercaseString();
++}
++
++std::u16string FreeIcon(const std::vector<Workspace>& workspaces) {
++  for (std::u16string_view icon : kWorkspaceIcons) {
++    if (std::ranges::find(workspaces, icon, &Workspace::icon) ==
++        workspaces.end()) {
++      return std::u16string(icon);
++    }
++  }
++  return std::u16string(
++      kWorkspaceIcons[workspaces.size() % kWorkspaceIcons.size()]);
++}
++
++void FillMissingIcons(std::vector<Workspace>& workspaces) {
++  for (Workspace& workspace : workspaces) {
++    if (workspace.icon.empty()) {
++      workspace.icon = FreeIcon(workspaces);
++    }
++  }
++}
++
++std::u16string FreeName(const std::vector<Workspace>& workspaces) {
++  for (int number = 1;; ++number) {
++    std::u16string name = l10n_util::GetStringFUTF16(
++        IDS_WORKSPACE_NEW_NAME, base::NumberToString16(number));
++    if (std::ranges::find(workspaces, name, &Workspace::name) ==
++        workspaces.end()) {
++      return name;
++    }
++  }
 +}
 +
 +tab_groups::TabGroupColorId ColorForIndex(size_t index) {
@@ -774,9 +886,10 @@ index 000000000..47a16fd35
 +  }
 +  if (workspaces_.empty()) {
 +    workspaces_.push_back(
-+        {NewId(), l10n_util::GetStringUTF16(IDS_WORKSPACE_DEFAULT_NAME), u"",
-+         ColorForIndex(0)});
++        {NewId(), l10n_util::GetStringUTF16(IDS_WORKSPACE_DEFAULT_NAME),
++         FreeIcon(workspaces_), ColorForIndex(0)});
 +  }
++  FillMissingIcons(workspaces_);
 +  if (!FindWorkspace(active_)) {
 +    active_ = workspaces_.front().id;
 +  }
@@ -866,10 +979,11 @@ index 000000000..47a16fd35
 +
 +const Workspace* WorkspaceController::GetWorkspaceOf(
 +    const tabs::TabInterface* tab) const {
-+  if (!tab || tab->IsPinned()) {
-+    return nullptr;
-+  }
-+  return FindWorkspace(GetWorkspaceIdOf(tab));
++  return tab ? FindWorkspace(GetWorkspaceIdOf(tab)) : nullptr;
++}
++
++bool WorkspaceController::IsEssential(const tabs::TabInterface* tab) const {
++  return tab && GetWorkspaceIdOf(tab) == kEssentialsId;
 +}
 +
 +void WorkspaceController::ActivateWorkspace(const std::string& id) {
@@ -880,17 +994,16 @@ index 000000000..47a16fd35
 +  tabs::TabInterface* target = nullptr;
 +  for (auto it = activation_order_.rbegin(); it != activation_order_.rend();
 +       ++it) {
-+    if (auto* tab = it->Get(); tab && !tab->IsPinned() &&
-+                               GetWorkspaceIdOf(tab) == id &&
-+                               model_->GetIndexOfTab(tab) !=
-+                                   TabStripModel::kNoTab) {
++    if (auto* tab = it->Get();
++        tab && GetWorkspaceIdOf(tab) == id &&
++        model_->GetIndexOfTab(tab) != TabStripModel::kNoTab) {
 +      target = tab;
 +      break;
 +    }
 +  }
 +  if (!target) {
 +    for (auto* tab : *model_) {
-+      if (!tab->IsPinned() && GetWorkspaceIdOf(tab) == id &&
++      if (GetWorkspaceIdOf(tab) == id &&
 +          (!target ||
 +           tab->GetLastActiveTime() > target->GetLastActiveTime())) {
 +        target = tab;
@@ -929,12 +1042,8 @@ index 000000000..47a16fd35
 +
 +std::string WorkspaceController::CreateWorkspace() {
 +  const std::string id = NewId();
-+  workspaces_.push_back(
-+      {id,
-+       l10n_util::GetStringFUTF16(
-+           IDS_WORKSPACE_NEW_NAME,
-+           base::NumberToString16(workspaces_.size() + 1)),
-+       u"", ColorForIndex(workspaces_.size())});
++  workspaces_.push_back({id, FreeName(workspaces_), FreeIcon(workspaces_),
++                         ColorForIndex(workspaces_.size())});
 +  ActivateWorkspace(id);
 +  NotifyWorkspacesChanged();
 +  return id;
@@ -964,6 +1073,7 @@ index 000000000..47a16fd35
 +    }
 +  }
 +  if (changed) {
++    FillMissingIcons(workspaces_);
 +    NotifyWorkspacesChanged();
 +    ScheduleUpdate();
 +  }
@@ -979,7 +1089,7 @@ index 000000000..47a16fd35
 +  }
 +  std::vector<tabs::TabHandle> tabs;
 +  for (auto* tab : *model_) {
-+    if (!tab->IsPinned() && GetWorkspaceIdOf(tab) == id) {
++    if (GetWorkspaceIdOf(tab) == id) {
 +      tabs.push_back(tab->GetHandle());
 +    }
 +  }
@@ -1007,9 +1117,6 @@ index 000000000..47a16fd35
 +  }
 +  bool moves_active = false;
 +  for (auto* tab : *model_) {
-+    if (tab->IsPinned()) {
-+      continue;
-+    }
 +    const bool in_unit = std::ranges::any_of(tabs, [tab](auto* moved) {
 +      return moved == tab ||
 +             (tab->GetGroup() && tab->GetGroup() == moved->GetGroup()) ||
@@ -1027,14 +1134,29 @@ index 000000000..47a16fd35
 +  ScheduleUpdate();
 +}
 +
++void WorkspaceController::SetEssential(
++    const std::vector<tabs::TabInterface*>& tabs,
++    bool essential) {
++  for (auto* tab : tabs) {
++    tab_workspaces_[tab->GetHandle()] = essential ? kEssentialsId : active_;
++  }
++  ScheduleUpdate();
++}
++
 +bool WorkspaceController::IsFilteringTabs() const {
 +  const auto* state = tabs::VerticalTabStripStateController::From(browser_);
 +  return state && state->ShouldDisplayVerticalTabs();
 +}
 +
 +bool WorkspaceController::IsTabVisible(const tabs::TabInterface* tab) const {
-+  return tab && (tab->IsPinned() || !IsFilteringTabs() ||
-+                 GetWorkspaceIdOf(tab) == active_);
++  if (!tab) {
++    return false;
++  }
++  if (!IsFilteringTabs()) {
++    return true;
++  }
++  const std::string id = GetWorkspaceIdOf(tab);
++  return id == active_ || id == kEssentialsId;
 +}
 +
 +std::vector<tabs::TabInterface*> WorkspaceController::GetVisibleTabs() const {
@@ -1063,11 +1185,13 @@ index 000000000..47a16fd35
 +  return it == workspaces_.end() ? nullptr : &*it;
 +}
 +
-+const std::string& WorkspaceController::GetWorkspaceIdOf(
++std::string WorkspaceController::GetWorkspaceIdOf(
 +    const tabs::TabInterface* tab) const {
 +  const auto it = tab_workspaces_.find(tab->GetHandle());
-+  return it != tab_workspaces_.end() && FindWorkspace(it->second) ? it->second
-+                                                                  : active_;
++  if (it != tab_workspaces_.end() && FindWorkspace(it->second)) {
++    return it->second;
++  }
++  return tab->IsPinned() ? kEssentialsId : active_;
 +}
 +
 +void WorkspaceController::SetActive(const std::string& id) {
@@ -1114,7 +1238,7 @@ index 000000000..47a16fd35
 +    AssignUnits();
 +    ArrangeTabs();
 +  }
-+  if (auto* tab = model_->GetActiveTab(); tab && !tab->IsPinned()) {
++  if (auto* tab = model_->GetActiveTab()) {
 +    SetActive(GetWorkspaceIdOf(tab));
 +  }
 +  Persist();
@@ -1126,13 +1250,9 @@ index 000000000..47a16fd35
 +  std::map<split_tabs::SplitTabId, std::string> splits;
 +  std::erase_if(tab_workspaces_, [this](const auto& entry) {
 +    const auto* tab = entry.first.Get();
-+    return !tab || tab->IsPinned() ||
-+           model_->GetIndexOfTab(tab) == TabStripModel::kNoTab;
++    return !tab || model_->GetIndexOfTab(tab) == TabStripModel::kNoTab;
 +  });
 +  for (auto* tab : *model_) {
-+    if (tab->IsPinned()) {
-+      continue;
-+    }
 +    std::string id = GetWorkspaceIdOf(tab);
 +    if (const auto group = tab->GetGroup()) {
 +      id = groups.try_emplace(*group, id).first->second;
@@ -1146,9 +1266,6 @@ index 000000000..47a16fd35
 +void WorkspaceController::ArrangeTabs() {
 +  std::vector<std::pair<std::string, Unit>> units;
 +  for (auto* tab : *model_) {
-+    if (tab->IsPinned()) {
-+      continue;
-+    }
 +    const auto group = tab->GetGroup();
 +    const auto split = group ? std::nullopt : tab->GetSplit();
 +    if (!units.empty()) {
@@ -1160,29 +1277,36 @@ index 000000000..47a16fd35
 +    units.emplace_back(GetWorkspaceIdOf(tab),
 +                       Unit{tab->GetHandle(), group, split});
 +  }
-+  int target = model_->IndexOfFirstNonPinnedTab();
++  std::vector<std::string> order = {kEssentialsId};
 +  for (const auto& workspace : workspaces_) {
-+    for (const auto& [id, unit] : units) {
-+      if (id != workspace.id) {
-+        continue;
-+      }
-+      const int index = model_->GetIndexOfTab(unit.first.Get());
-+      int size = 1;
-+      if (unit.group) {
-+        size = model_->group_model()->GetTabGroup(*unit.group)->tab_count();
-+        if (index != target) {
-+          model_->MoveGroupTo(*unit.group, target);
++    order.push_back(workspace.id);
++  }
++  for (const bool pinned : {true, false}) {
++    int target = pinned ? 0 : model_->IndexOfFirstNonPinnedTab();
++    for (const auto& workspace_id : order) {
++      for (const auto& [id, unit] : units) {
++        const tabs::TabInterface* tab = unit.first.Get();
++        if (id != workspace_id || tab->IsPinned() != pinned) {
++          continue;
 +        }
-+      } else if (unit.split) {
-+        size = static_cast<int>(
-+            model_->GetSplitData(*unit.split)->ListTabs().size());
-+        if (index != target) {
-+          model_->MoveSplitTo(*unit.split, target, false, std::nullopt);
++        const int index = model_->GetIndexOfTab(tab);
++        int size = 1;
++        if (unit.group) {
++          size = model_->group_model()->GetTabGroup(*unit.group)->tab_count();
++          if (index != target) {
++            model_->MoveGroupTo(*unit.group, target);
++          }
++        } else if (unit.split) {
++          size = static_cast<int>(
++              model_->GetSplitData(*unit.split)->ListTabs().size());
++          if (index != target) {
++            model_->MoveSplitTo(*unit.split, target, pinned, std::nullopt);
++          }
++        } else if (index != target) {
++          model_->MoveWebContentsAt(index, target, false, std::nullopt);
 +        }
-+      } else if (index != target) {
-+        model_->MoveWebContentsAt(index, target, false, std::nullopt);
++        target += size;
 +      }
-+      target += size;
 +    }
 +  }
 +}
@@ -1236,10 +1360,8 @@ index 000000000..47a16fd35
 +    for (const auto& inserted : change.GetInsert()->contents) {
 +      const std::string restored =
 +          chrome::TakeRestoredWorkspaceId(inserted.contents);
-+      if (!inserted.tab->IsPinned()) {
-+        tab_workspaces_[inserted.tab->GetHandle()] =
-+            FindWorkspace(restored) ? restored : active_;
-+      }
++      tab_workspaces_[inserted.tab->GetHandle()] =
++          FindWorkspace(restored) ? restored : GetWorkspaceIdOf(inserted.tab);
 +    }
 +  } else if (change.type() == TabStripModelChange::kRemoved) {
 +    for (const auto& removed : change.GetRemove()->contents) {
@@ -1251,7 +1373,7 @@ index 000000000..47a16fd35
 +    const auto handle = selection.new_tab->GetHandle();
 +    std::erase(activation_order_, handle);
 +    activation_order_.push_back(handle);
-+    if (!selection.new_tab->IsPinned() && !IsRestoring()) {
++    if (!IsRestoring()) {
 +      SetActive(GetWorkspaceIdOf(selection.new_tab));
 +    }
 +  }
@@ -1260,11 +1382,7 @@ index 000000000..47a16fd35
 +
 +void WorkspaceController::OnTabPinnedStateChanged(tabs::TabInterface* tab,
 +                                                  int index) {
-+  if (tab->IsPinned()) {
-+    tab_workspaces_.erase(tab->GetHandle());
-+  } else {
-+    tab_workspaces_[tab->GetHandle()] = active_;
-+  }
++  tab_workspaces_[tab->GetHandle()] = GetWorkspaceIdOf(tab);
 +  ScheduleUpdate();
 +}
 +
@@ -1289,10 +1407,10 @@ index 000000000..47a16fd35
 +}  // namespace workspaces
 diff --git a/chrome/browser/ui/workspaces/workspace_controller.h b/chrome/browser/ui/workspaces/workspace_controller.h
 new file mode 100644
-index 000000000..d085bd0bd
+index 000000000..61272c6e3
 --- /dev/null
 +++ b/chrome/browser/ui/workspaces/workspace_controller.h
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,159 @@
 +// Copyright 2026 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -1300,8 +1418,10 @@ index 000000000..d085bd0bd
 +#ifndef CHROME_BROWSER_UI_WORKSPACES_WORKSPACE_CONTROLLER_H_
 +#define CHROME_BROWSER_UI_WORKSPACES_WORKSPACE_CONTROLLER_H_
 +
++#include <array>
 +#include <map>
 +#include <string>
++#include <string_view>
 +#include <vector>
 +
 +#include "base/callback_list.h"
@@ -1319,6 +1439,17 @@ index 000000000..d085bd0bd
 +
 +namespace workspaces {
 +
++// Emoji offered by the workspace icon picker. New workspaces get the first one
++// not used by another workspace.
++inline constexpr auto kWorkspaceIcons = std::to_array<std::u16string_view>({
++    u"🏠", u"💼", u"💻", u"📚", u"🎓", u"🎮", u"🎵", u"🎬",
++    u"🎨", u"📷", u"📝", u"🔬", u"💡", u"🚀", u"🛒", u"💰",
++    u"📈", u"📁", u"📌", u"📅", u"📧", u"💬", u"🌐", u"🔒",
++    u"🔧", u"🧪", u"🧠", u"💜", u"⭐", u"🔥", u"🌱", u"🌍",
++    u"🍔", u"☕", u"⚽", u"🏀", u"🎧", u"📺", u"🎲", u"🐱",
++    u"🐶", u"🌸", u"🌙", u"🌞", u"🍀", u"🎁", u"🧳", u"🚗",
++});
++
 +struct Workspace {
 +  std::string id;
 +  std::u16string name;
@@ -1328,10 +1459,11 @@ index 000000000..d085bd0bd
 +  bool operator==(const Workspace&) const = default;
 +};
 +
-+// Splits the unpinned tabs of a window into workspaces. Pinned tabs are shared
-+// by all workspaces. Tabs of a workspace are kept as one contiguous block, in
-+// the order of the workspace list. Workspaces only hide tabs while the
-+// vertical tab strip is shown.
++// Splits the tabs of a window into workspaces. Pinned tabs belong to their
++// workspace, except Essentials, which are shared by all workspaces. Pinned and
++// unpinned tabs of a workspace are each kept as one contiguous block, in the
++// order of the workspace list, with Essentials first. Workspaces only hide tabs
++// while the vertical tab strip is shown.
 +class WorkspaceController : public TabStripModelObserver {
 + public:
 +  DECLARE_USER_DATA(WorkspaceController);
@@ -1359,8 +1491,9 @@ index 000000000..d085bd0bd
 +
 +  const std::vector<Workspace>& GetWorkspaces() const { return workspaces_; }
 +  const Workspace* GetActiveWorkspace() const;
-+  // Returns nullptr for pinned tabs.
++  // Returns nullptr for Essentials.
 +  const Workspace* GetWorkspaceOf(const tabs::TabInterface* tab) const;
++  bool IsEssential(const tabs::TabInterface* tab) const;
 +
 +  void ActivateWorkspace(const std::string& id);
 +  void ActivateWorkspaceAt(int index);
@@ -1376,6 +1509,10 @@ index 000000000..d085bd0bd
 +  void CloseWorkspace(const std::string& id);
 +  void MoveTabsToWorkspace(const std::vector<tabs::TabInterface*>& tabs,
 +                           const std::string& id);
++  // Marks `tabs` as Essentials, or returns them to the active workspace. The
++  // caller pins or unpins them.
++  void SetEssential(const std::vector<tabs::TabInterface*>& tabs,
++                    bool essential);
 +
 +  // Returns true if workspaces currently hide tabs of inactive workspaces.
 +  bool IsFilteringTabs() const;
@@ -1387,7 +1524,7 @@ index 000000000..d085bd0bd
 +
 + private:
 +  const Workspace* FindWorkspace(const std::string& id) const;
-+  const std::string& GetWorkspaceIdOf(const tabs::TabInterface* tab) const;
++  std::string GetWorkspaceIdOf(const tabs::TabInterface* tab) const;
 +  void SetActive(const std::string& id);
 +  void ActivateRelativeWorkspace(int offset);
 +  bool IsClosingWindow() const;
@@ -1435,10 +1572,10 @@ index 000000000..d085bd0bd
 +#endif  // CHROME_BROWSER_UI_WORKSPACES_WORKSPACE_CONTROLLER_H_
 diff --git a/chrome/browser/ui/workspaces/workspace_controller_unittest.cc b/chrome/browser/ui/workspaces/workspace_controller_unittest.cc
 new file mode 100644
-index 000000000..9a4aaca4b
+index 000000000..1484df57d
 --- /dev/null
 +++ b/chrome/browser/ui/workspaces/workspace_controller_unittest.cc
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,288 @@
 +// Copyright 2026 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -1522,19 +1659,84 @@ index 000000000..9a4aaca4b
 +  tabs::TabInterface* pinned = AddTabToEnd();
 +  model()->SetTabPinned(model()->GetIndexOfTab(pinned), true);
 +  Flush();
-+  EXPECT_EQ(nullptr, controller()->GetWorkspaceOf(pinned));
++  model()->ActivateTab(a1);
++  Flush();
 +
 +  controller()->CreateWorkspace();
 +  Flush();
 +  tabs::TabInterface* b1 = model()->GetActiveTab();
 +  EXPECT_FALSE(controller()->IsTabVisible(a1));
++  EXPECT_FALSE(controller()->IsTabVisible(pinned));
 +  EXPECT_TRUE(controller()->IsTabVisible(b1));
-+  EXPECT_TRUE(controller()->IsTabVisible(pinned));
 +
 +  controller()->ActivateWorkspace(first);
 +  Flush();
 +  EXPECT_EQ(a1, model()->GetActiveTab());
++  EXPECT_TRUE(controller()->IsTabVisible(pinned));
 +  EXPECT_FALSE(controller()->IsTabVisible(b1));
++}
++
++TEST_F(WorkspaceControllerTest, PinnedTabsStayInTheirWorkspace) {
++  const std::string first = ActiveId();
++  tabs::TabInterface* a1 = AddTabToEnd();
++  model()->SetTabPinned(model()->GetIndexOfTab(a1), true);
++  Flush();
++  EXPECT_EQ(first, WorkspaceOf(a1));
++  EXPECT_FALSE(controller()->IsEssential(a1));
++
++  const std::string second = controller()->CreateWorkspace();
++  Flush();
++  model()->SetTabPinned(model()->GetIndexOfTab(a1), false);
++  Flush();
++  EXPECT_EQ(first, WorkspaceOf(a1));
++  EXPECT_EQ(second, ActiveId());
++}
++
++TEST_F(WorkspaceControllerTest, EssentialsAreSharedAndComeFirst) {
++  EnableVerticalTabs();
++  const std::string first = ActiveId();
++  tabs::TabInterface* pinned = AddTabToEnd();
++  model()->SetTabPinned(model()->GetIndexOfTab(pinned), true);
++  tabs::TabInterface* essential = AddTabToEnd();
++  controller()->SetEssential({essential}, true);
++  model()->SetTabPinned(model()->GetIndexOfTab(essential), true);
++  Flush();
++  EXPECT_TRUE(controller()->IsEssential(essential));
++  EXPECT_EQ(nullptr, controller()->GetWorkspaceOf(essential));
++  EXPECT_EQ(0, model()->GetIndexOfTab(essential));
++  EXPECT_EQ(1, model()->GetIndexOfTab(pinned));
++
++  const std::string second = controller()->CreateWorkspace();
++  Flush();
++  EXPECT_TRUE(controller()->IsTabVisible(essential));
++  model()->ActivateTab(essential);
++  Flush();
++  EXPECT_EQ(second, ActiveId());
++
++  controller()->SetEssential({essential}, false);
++  model()->SetTabPinned(model()->GetIndexOfTab(essential), false);
++  Flush();
++  EXPECT_FALSE(controller()->IsEssential(essential));
++  EXPECT_EQ(second, WorkspaceOf(essential));
++  EXPECT_EQ(first, WorkspaceOf(pinned));
++}
++
++TEST_F(WorkspaceControllerTest, CloseWorkspaceClosesItsPinnedTabs) {
++  tabs::TabInterface* essential = AddTabToEnd();
++  controller()->SetEssential({essential}, true);
++  model()->SetTabPinned(model()->GetIndexOfTab(essential), true);
++  const std::string second = controller()->CreateWorkspace();
++  Flush();
++  tabs::TabInterface* b1 = AddTabToEnd();
++  model()->SetTabPinned(model()->GetIndexOfTab(b1), true);
++  Flush();
++  ASSERT_EQ(3, model()->count());
++
++  controller()->CloseWorkspace(second);
++  Flush();
++  ASSERT_EQ(2, model()->count());
++  EXPECT_EQ(essential, model()->GetTabAtIndex(0));
++  EXPECT_EQ(ActiveId(), WorkspaceOf(model()->GetTabAtIndex(1)));
 +}
 +
 +TEST_F(WorkspaceControllerTest, HorizontalTabsShowEverything) {
@@ -1617,13 +1819,39 @@ index 000000000..9a4aaca4b
 +TEST_F(WorkspaceControllerTest, MergeRestoredWorkspacesAddsMissing) {
 +  const std::string active = ActiveId();
 +  const Workspace existing = *controller()->GetActiveWorkspace();
-+  const Workspace restored = {"restored", u"Work", u"",
++  const Workspace restored = {"restored", u"Work", u"🚗",
 +                              tab_groups::TabGroupColorId::kRed};
 +  controller()->MergeRestoredWorkspaces(
 +      WorkspaceController::Serialize({existing, restored}, "restored"));
 +  ASSERT_EQ(2u, controller()->GetWorkspaces().size());
 +  EXPECT_EQ(restored, controller()->GetWorkspaces()[1]);
 +  EXPECT_EQ(active, ActiveId());
++}
++
++TEST_F(WorkspaceControllerTest, NewWorkspacesGetFreeNameAndIcon) {
++  EXPECT_EQ(kWorkspaceIcons[0], controller()->GetActiveWorkspace()->icon);
++  const std::string first = controller()->CreateWorkspace();
++  const std::string second = controller()->CreateWorkspace();
++  controller()->CloseWorkspace(first);
++  Flush();
++  controller()->CreateWorkspace();
++  Flush();
++
++  const std::vector<Workspace>& workspaces = controller()->GetWorkspaces();
++  ASSERT_EQ(3u, workspaces.size());
++  EXPECT_EQ(second, workspaces[1].id);
++  EXPECT_EQ(u"Workspace 2", workspaces[1].name);
++  EXPECT_EQ(kWorkspaceIcons[2], workspaces[1].icon);
++  EXPECT_EQ(u"Workspace 1", workspaces[2].name);
++  EXPECT_EQ(kWorkspaceIcons[1], workspaces[2].icon);
++}
++
++TEST_F(WorkspaceControllerTest, RestoredWorkspacesWithoutIconGetOne) {
++  controller()->MergeRestoredWorkspaces(WorkspaceController::Serialize(
++      {{"restored", u"Work", u"", tab_groups::TabGroupColorId::kRed}},
++      "restored"));
++  ASSERT_EQ(2u, controller()->GetWorkspaces().size());
++  EXPECT_EQ(kWorkspaceIcons[1], controller()->GetWorkspaces()[1].icon);
 +}
 +
 +TEST_F(WorkspaceControllerTest, InertForPopupAndIncognito) {
@@ -1636,3 +1864,15 @@ index 000000000..9a4aaca4b
 +}
 +
 +}  // namespace workspaces
+diff --git a/components/tabs/public/tab_context_menu_command.h b/components/tabs/public/tab_context_menu_command.h
+index c0840963f..6a098cdfb 100644
+--- a/components/tabs/public/tab_context_menu_command.h
++++ b/components/tabs/public/tab_context_menu_command.h
+@@ -42,6 +42,7 @@ enum TabContextMenuCommand {
+   CommandToggleFocusGroup,
+   CommandDiscard,
+   CommandToggleTabMuted,
++  CommandToggleEssential,
+ };
+ // LINT.ThenChange(//tools/metrics/histograms/metadata/tab/histograms.xml:TabContextMenuCommand)
+ 

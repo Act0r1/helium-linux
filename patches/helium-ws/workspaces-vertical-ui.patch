@@ -1,5 +1,121 @@
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 19bf2971d..73d4544dc 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -2031,6 +2031,11 @@ void BrowserView::UpdateZenModeRevealFromCursor() {
+   UpdateZenModeReveal(reveal_top, reveal_side);
+ }
+ 
++namespace {
++bool HasOpenBubbleAnchoredIn(const views::Widget* browser_widget,
++                             const views::View* anchor_root);
++}  // namespace
++
+ void BrowserView::UpdateZenModeReveal(bool reveal_top, bool reveal_side) {
+   if (!zen_mode_enabled_) {
+     return;
+@@ -2045,6 +2050,13 @@ void BrowserView::UpdateZenModeReveal(bool reveal_top, bool reveal_side) {
+     reveal_side = true;
+   }
+ 
++  // Keep the VTS visible while a bubble anchored inside it is open.
++  if (!reveal_side && ShouldDrawVerticalTabStrip() &&
++      HasOpenBubbleAnchoredIn(GetWidget(),
++                              vertical_tab_strip_region_view_.get())) {
++    reveal_side = true;
++  }
++
+   // Pinned top chrome stays visible regardless of cursor position.
+   if (IsZenModeTopChromePinned()) {
+     reveal_top = true;
+@@ -2175,6 +2187,20 @@ bool IsOpenBubbleAnchoredInViewSubtree(views::Widget* widget,
+   return anchor_view && anchor_root->Contains(anchor_view);
+ }
+ 
++bool HasOpenBubbleAnchoredIn(const views::Widget* browser_widget,
++                             const views::View* anchor_root) {
++  if (!browser_widget || !anchor_root) {
++    return false;
++  }
++  for (views::Widget* widget :
++       views::Widget::GetAllOwnedWidgets(browser_widget->GetNativeView())) {
++    if (IsOpenBubbleAnchoredInViewSubtree(widget, anchor_root)) {
++      return true;
++    }
++  }
++  return false;
++}
++
+ bool IsSidePanelOpen(const SidePanel* side_panel) {
+   if (!side_panel) {
+     return false;
+@@ -2196,16 +2222,7 @@ bool BrowserView::HasOpenBubbleFromTopContainer() const {
+   if (IsSidePanelOpen(side_panel_)) {
+     return true;
+   }
+-  if (!top_container_ || !GetWidget()) {
+-    return false;
+-  }
+-  for (views::Widget* widget :
+-       views::Widget::GetAllOwnedWidgets(GetWidget()->GetNativeView())) {
+-    if (IsOpenBubbleAnchoredInViewSubtree(widget, top_container_)) {
+-      return true;
+-    }
+-  }
+-  return false;
++  return HasOpenBubbleAnchoredIn(GetWidget(), top_container_);
+ }
+ 
+ void BrowserView::AppMenuShown() {
+diff --git a/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.cc b/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.cc
+index e2d93808d..0535cea4e 100644
+--- a/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.cc
++++ b/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.cc
+@@ -116,7 +116,12 @@ gfx::Size PinnedTabContainerView::GetMinimumSize() const {
+ 
+   // The minimum size should be enough to show a row and a half, if needed.
+   auto collapse_state = GetTabStripCollapseState();
+-  const int num_children = collection_node_->GetDirectChildren().size();
++  int num_children = 0;
++  for (const auto* child : collection_node_->GetDirectChildren()) {
++    if (layout_manager_->CanBeVisible(child)) {
++      num_children++;
++    }
++  }
+   const float min_rows = std::min(
+       (collapse_state != tabs::VerticalTabStripCollapseState::kExpanded ? 1.5f
+                                                                         : 1.0f),
+@@ -382,9 +387,17 @@ views::ProposedLayout PinnedTabContainerView::CalculateVerticalLayout(
+ 
+   int x = 0;
+   int y = 0;
+-  int children_on_row = children.size();
++  int children_on_row = 0;
++  for (const auto* child : children) {
++    if (layout_manager_->CanBeVisible(child)) {
++      children_on_row++;
++    }
++  }
+ 
+   if (children_on_row == 0) {
++    for (auto* child : children) {
++      layouts.child_layouts.emplace_back(child, false, gfx::Rect());
++    }
+     layouts.host_size = gfx::Size(0, 0);
+     return layouts;
+   }
+@@ -431,7 +444,8 @@ views::ProposedLayout PinnedTabContainerView::CalculateVerticalLayout(
+     bounds.set_width(child_width);
+ 
+     auto drag_data = GetVisualDataForDraggedView(*child);
+-    const bool should_show_child = !(drag_data && drag_data->should_hide);
++    const bool should_show_child = layout_manager_->CanBeVisible(child) &&
++                                   !(drag_data && drag_data->should_hide);
+     if (!should_show_child) {
+       layouts.child_layouts.emplace_back(child, false, gfx::Rect());
+       continue;
 diff --git a/chrome/browser/ui/views/tabs/common/tab_strip_view.cc b/chrome/browser/ui/views/tabs/common/tab_strip_view.cc
-index e48e2d5bd..114b8422e 100644
+index e48e2d5bd..dea61895d 100644
 --- a/chrome/browser/ui/views/tabs/common/tab_strip_view.cc
 +++ b/chrome/browser/ui/views/tabs/common/tab_strip_view.cc
 @@ -30,6 +30,7 @@
@@ -51,7 +167,7 @@ index e48e2d5bd..114b8422e 100644
    collection_node_ = nullptr;
    if (tab_scroll_button_container_) {
      tab_scroll_button_container_->SetScrollView(nullptr);
-@@ -798,6 +812,41 @@ gfx::Rect TabStripView::GetBoundsInScrollViewContents(
+@@ -798,6 +812,43 @@ gfx::Rect TabStripView::GetBoundsInScrollViewContents(
    return bounds;
  }
  
@@ -67,26 +183,28 @@ index e48e2d5bd..114b8422e 100644
 +  if (!collection_node_ || !workspace_observation_.IsObserving()) {
 +    return;
 +  }
-+  auto* unpinned =
-+      collection_node_->GetChildNodeOfType(TabCollectionNode::Type::UNPINNED);
-+  if (!unpinned) {
-+    return;
-+  }
 +  const auto* controller = workspace_observation_.GetSource();
-+  for (const auto& child : unpinned->children()) {
-+    const TabCollectionNode* node = child.get();
-+    while (node->type() != TabCollectionNode::Type::TAB &&
-+           !node->children().empty()) {
-+      node = node->children().front().get();
++  for (const auto type :
++       {TabCollectionNode::Type::PINNED, TabCollectionNode::Type::UNPINNED}) {
++    auto* container = collection_node_->GetChildNodeOfType(type);
++    if (!container) {
++      continue;
 +    }
-+    const tabs::TabInterface* tab =
-+        node->type() == TabCollectionNode::Type::TAB
-+            ? std::get<tabs::ConstDanglingUntriagedTabInterface>(
-+                  node->GetNodeData())
-+            : nullptr;
-+    child->view()->SetVisible(!tab || controller->IsTabVisible(tab));
++    for (const auto& child : container->children()) {
++      const TabCollectionNode* node = child.get();
++      while (node->type() != TabCollectionNode::Type::TAB &&
++             !node->children().empty()) {
++        node = node->children().front().get();
++      }
++      const tabs::TabInterface* tab =
++          node->type() == TabCollectionNode::Type::TAB
++              ? std::get<tabs::ConstDanglingUntriagedTabInterface>(
++                    node->GetNodeData())
++              : nullptr;
++      child->view()->SetVisible(!tab || controller->IsTabVisible(tab));
++    }
++    container->view()->InvalidateLayout();
 +  }
-+  unpinned->view()->InvalidateLayout();
 +  InvalidateLayout();
 +}
 +
@@ -266,10 +384,10 @@ index fe76a1b5d..7210c8225 100644
  
 diff --git a/chrome/browser/ui/views/workspaces/workspace_switcher_view.cc b/chrome/browser/ui/views/workspaces/workspace_switcher_view.cc
 new file mode 100644
-index 000000000..1b2326d46
+index 000000000..558dd366f
 --- /dev/null
 +++ b/chrome/browser/ui/views/workspaces/workspace_switcher_view.cc
-@@ -0,0 +1,596 @@
+@@ -0,0 +1,724 @@
 +// Copyright 2026 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -283,6 +401,7 @@ index 000000000..1b2326d46
 +#include <vector>
 +
 +#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
 +#include "base/i18n/break_iterator.h"
 +#include "base/i18n/case_conversion.h"
 +#include "base/memory/raw_ptr.h"
@@ -293,6 +412,8 @@ index 000000000..1b2326d46
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 +#include "chrome/browser/ui/tabs/tab_group_theme.h"
 +#include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
++#include "chrome/browser/ui/views/frame/browser_view.h"
++#include "chrome/browser/ui/views/frame/tab_strip_region_view.h"
 +#include "chrome/browser/ui/workspaces/workspace_controller.h"
 +#include "chrome/grit/generated_resources.h"
 +#include "components/tab_groups/tab_group_color.h"
@@ -331,6 +452,7 @@ index 000000000..1b2326d46
 +#include "ui/views/view_tracker.h"
 +#include "ui/views/view_utils.h"
 +#include "ui/views/widget/widget.h"
++#include "ui/views/widget/widget_delegate.h"
 +
 +namespace {
 +
@@ -341,6 +463,7 @@ index 000000000..1b2326d46
 +constexpr int kChipSize = 28;
 +constexpr int kHeaderHeight = 32;
 +constexpr int kCornerRadius = 8;
++constexpr size_t kPickerColumns = 8;
 +constexpr SkAlpha kActiveChipAlpha = 0x40;
 +constexpr SkAlpha kHeaderAlpha = 0x26;
 +constexpr SkAlpha kInactiveTextAlpha = 0x80;
@@ -414,6 +537,145 @@ index 000000000..1b2326d46
 +  const tab_groups::TabGroupColorId selected_;
 +};
 +
++class WorkspaceChipButton : public views::LabelButton {
++  METADATA_HEADER(WorkspaceChipButton, views::LabelButton)
++
++ public:
++  WorkspaceChipButton(PressedCallback callback, std::u16string_view text)
++      : LabelButton(std::move(callback), text) {
++    SetPreferredSize(gfx::Size(kChipSize, kChipSize));
++    SetMinSize(gfx::Size(kChipSize, kChipSize));
++    SetHorizontalAlignment(gfx::ALIGN_CENTER);
++    SetBorder(views::CreateEmptyBorder(0));
++    label()->SetSubpixelRenderingEnabled(false);
++    views::InstallRoundRectHighlightPathGenerator(this, gfx::Insets(),
++                                                  kCornerRadius);
++  }
++  WorkspaceChipButton(const WorkspaceChipButton&) = delete;
++  WorkspaceChipButton& operator=(const WorkspaceChipButton&) = delete;
++  ~WorkspaceChipButton() override = default;
++};
++
++BEGIN_METADATA(WorkspaceChipButton)
++END_METADATA
++
++using IconPickedCallback = base::OnceCallback<void(const std::u16string&)>;
++
++// Grid of workspace icons. Picking one runs the callback and closes the bubble.
++class WorkspaceIconGrid : public views::View {
++  METADATA_HEADER(WorkspaceIconGrid, views::View)
++
++ public:
++  WorkspaceIconGrid(
++      IconPickedCallback callback,
++      std::unique_ptr<views::BubbleDialogDelegate::CloseOnDeactivatePin>
++          parent_pin)
++      : callback_(std::move(callback)), parent_pin_(std::move(parent_pin)) {
++    SetLayoutManager(std::make_unique<views::FlexLayout>())
++        ->SetOrientation(views::LayoutOrientation::kVertical);
++    views::View* row = nullptr;
++    for (size_t i = 0; i < workspaces::kWorkspaceIcons.size(); ++i) {
++      if (i % kPickerColumns == 0) {
++        row = AddChildView(std::make_unique<views::View>());
++        row->SetLayoutManager(std::make_unique<views::FlexLayout>());
++      }
++      const std::u16string icon(workspaces::kWorkspaceIcons[i]);
++      row->AddChildView(std::make_unique<WorkspaceChipButton>(
++          base::BindRepeating(&WorkspaceIconGrid::Pick, base::Unretained(this),
++                              icon),
++          icon));
++    }
++  }
++  WorkspaceIconGrid(const WorkspaceIconGrid&) = delete;
++  WorkspaceIconGrid& operator=(const WorkspaceIconGrid&) = delete;
++  ~WorkspaceIconGrid() override = default;
++
++ private:
++  void Pick(const std::u16string& icon) {
++    if (callback_) {
++      std::move(callback_).Run(icon);
++    }
++    GetWidget()->Close();
++  }
++
++  IconPickedCallback callback_;
++  std::unique_ptr<views::BubbleDialogDelegate::CloseOnDeactivatePin>
++      parent_pin_;
++};
++
++BEGIN_METADATA(WorkspaceIconGrid)
++END_METADATA
++
++// Keeps the vertical tab strip from collapsing on hover-out while a bubble
++// anchored in it is open. Returns null if `anchor` is not in a browser window.
++std::unique_ptr<ExpandOnHoverLock> KeepTabStripState(views::View* anchor) {
++  BrowserView* browser_view = BrowserView::GetBrowserViewForNativeWindow(
++      anchor->GetWidget()->GetNativeWindow());
++  if (!browser_view || !browser_view->tab_strip_view()) {
++    return nullptr;
++  }
++  return browser_view->tab_strip_view()->GetExpandOnHoverLock(
++      ExpandOnHoverLockType::kKeepCurrentState);
++}
++
++// Shows the icon picker below `anchor`. Keeps a bubble that contains `anchor`
++// open while the picker has focus.
++void ShowIconPicker(views::View* anchor, IconPickedCallback callback) {
++  std::unique_ptr<views::BubbleDialogDelegate::CloseOnDeactivatePin> pin;
++  if (auto* parent =
++          anchor->GetWidget()->widget_delegate()->AsBubbleDialogDelegate()) {
++    pin = parent->PreventCloseOnDeactivate();
++  }
++  std::unique_ptr<ui::DialogModel> model =
++      ui::DialogModel::Builder()
++          .SetAccessibleTitle(
++              l10n_util::GetStringUTF16(IDS_WORKSPACE_ICON_LABEL))
++          .OverrideShowCloseButton(false)
++          .SetDialogDestroyingCallback(
++              base::DoNothingWithBoundArgs(KeepTabStripState(anchor)))
++          .AddCustomField(
++              std::make_unique<views::BubbleDialogModelHost::CustomView>(
++                  std::make_unique<WorkspaceIconGrid>(std::move(callback),
++                                                      std::move(pin)),
++                  views::BubbleDialogModelHost::FieldType::kControl))
++          .Build();
++  auto bubble = std::make_unique<views::BubbleDialogModelHost>(
++      std::move(model), anchor, views::BubbleBorder::TOP_LEFT);
++  views::BubbleDialogDelegate::CreateBubbleDeprecated(
++      std::move(bubble), views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET)
++      ->Show();
++}
++
++// Icon field of the workspace editor. Clicking it opens the icon picker.
++class WorkspaceIconButton : public WorkspaceChipButton {
++  METADATA_HEADER(WorkspaceIconButton, WorkspaceChipButton)
++
++ public:
++  explicit WorkspaceIconButton(std::u16string_view icon)
++      : WorkspaceChipButton(
++            base::BindRepeating(&WorkspaceIconButton::OnPressed,
++                                base::Unretained(this)),
++            icon) {
++    SetTooltipText(l10n_util::GetStringUTF16(IDS_WORKSPACE_ICON_LABEL));
++  }
++  WorkspaceIconButton(const WorkspaceIconButton&) = delete;
++  WorkspaceIconButton& operator=(const WorkspaceIconButton&) = delete;
++  ~WorkspaceIconButton() override = default;
++
++ private:
++  void OnPressed() {
++    ShowIconPicker(this, base::BindOnce(&WorkspaceIconButton::SetIcon,
++                                        weak_factory_.GetWeakPtr()));
++  }
++
++  void SetIcon(const std::u16string& icon) { SetText(icon); }
++
++  base::WeakPtrFactory<WorkspaceIconButton> weak_factory_{this};
++};
++
++BEGIN_METADATA(WorkspaceIconButton)
++END_METADATA
++
 +// Shows the workspace context menu (edit, new, close) and the edit bubble.
 +class WorkspaceMenu : public ui::SimpleMenuModel::Delegate {
 + public:
@@ -472,6 +734,9 @@ index 000000000..1b2326d46
 +    if (it == workspaces.end() || !anchor_.view()) {
 +      return;
 +    }
++    auto icon_row = std::make_unique<views::FlexLayoutView>();
++    WorkspaceIconButton* icon_button = icon_row->AddChildView(
++        std::make_unique<WorkspaceIconButton>(IconText(*it)));
 +    auto color_model = std::make_unique<ColorComboboxModel>(it->color);
 +    const ColorComboboxModel* colors = color_model.get();
 +    auto model_holder = std::make_unique<raw_ptr<ui::DialogModel>>();
@@ -479,18 +744,24 @@ index 000000000..1b2326d46
 +    std::unique_ptr<ui::DialogModel> model =
 +        ui::DialogModel::Builder()
 +            .SetTitle(l10n_util::GetStringUTF16(IDS_WORKSPACE_EDIT))
++            .SetDialogDestroyingCallback(base::DoNothingWithBoundArgs(
++                KeepTabStripState(anchor_.view())))
++            .AddCustomField(
++                std::make_unique<views::BubbleDialogModelHost::CustomView>(
++                    std::move(icon_row),
++                    views::BubbleDialogModelHost::FieldType::kControl,
++                    icon_button),
++                kWorkspaceIconFieldId)
 +            .AddTextfield(kWorkspaceNameFieldId,
 +                          l10n_util::GetStringUTF16(IDS_WORKSPACE_NAME_LABEL),
 +                          it->name)
-+            .AddTextfield(kWorkspaceIconFieldId,
-+                          l10n_util::GetStringUTF16(IDS_WORKSPACE_ICON_LABEL),
-+                          it->icon)
 +            .AddCombobox(kWorkspaceColorFieldId,
 +                         l10n_util::GetStringUTF16(IDS_WORKSPACE_COLOR_LABEL),
 +                         std::move(color_model))
 +            .AddOkButton(base::BindOnce(&WorkspaceMenu::ApplyEdit,
 +                                        weak_factory_.GetWeakPtr(), *it,
-+                                        std::move(model_holder), colors))
++                                        std::move(model_holder), icon_button,
++                                        colors))
 +            .AddCancelButton(base::DoNothing())
 +            .SetInitiallyFocusedField(kWorkspaceNameFieldId)
 +            .Build();
@@ -504,6 +775,7 @@ index 000000000..1b2326d46
 +
 +  void ApplyEdit(workspaces::Workspace workspace,
 +                 std::unique_ptr<raw_ptr<ui::DialogModel>> model,
++                 const WorkspaceIconButton* icon,
 +                 const ColorComboboxModel* colors) {
 +    ui::DialogModel* dialog = model->get();
 +    const std::u16string name = std::u16string(base::TrimWhitespace(
@@ -512,9 +784,7 @@ index 000000000..1b2326d46
 +    if (!name.empty()) {
 +      workspace.name = name;
 +    }
-+    workspace.icon = FirstGrapheme(base::TrimWhitespace(
-+        dialog->GetTextfieldByUniqueId(kWorkspaceIconFieldId)->text(),
-+        base::TRIM_ALL));
++    workspace.icon = icon->GetText();
 +    workspace.color = colors->GetColorAt(
 +        dialog->GetComboboxByUniqueId(kWorkspaceColorFieldId)
 +            ->selected_index());
@@ -529,46 +799,15 @@ index 000000000..1b2326d46
 +  base::WeakPtrFactory<WorkspaceMenu> weak_factory_{this};
 +};
 +
-+class WorkspaceChipButton : public views::LabelButton {
-+  METADATA_HEADER(WorkspaceChipButton, views::LabelButton)
-+
-+ public:
-+  WorkspaceChipButton(PressedCallback callback,
-+                      std::u16string_view text,
-+                      std::string workspace_id)
-+      : LabelButton(std::move(callback), text),
-+        workspace_id_(std::move(workspace_id)) {
-+    SetPreferredSize(gfx::Size(kChipSize, kChipSize));
-+    SetMinSize(gfx::Size(kChipSize, kChipSize));
-+    SetHorizontalAlignment(gfx::ALIGN_CENTER);
-+    SetBorder(views::CreateEmptyBorder(0));
-+    views::InstallRoundRectHighlightPathGenerator(this, gfx::Insets(),
-+                                                  kCornerRadius);
-+  }
-+  WorkspaceChipButton(const WorkspaceChipButton&) = delete;
-+  WorkspaceChipButton& operator=(const WorkspaceChipButton&) = delete;
-+  ~WorkspaceChipButton() override = default;
-+
-+  const std::string& workspace_id() const { return workspace_id_; }
-+
-+ private:
-+  const std::string workspace_id_;
-+};
-+
-+BEGIN_METADATA(WorkspaceChipButton)
-+END_METADATA
-+
 +// The row of workspace icons at the bottom of the vertical tab strip.
 +class WorkspaceSwitcherView : public views::FlexLayoutView,
-+                              public workspaces::WorkspaceController::Observer,
-+                              public views::ContextMenuController {
++                              public workspaces::WorkspaceController::Observer {
 +  METADATA_HEADER(WorkspaceSwitcherView, views::FlexLayoutView)
 +
 + public:
 +  explicit WorkspaceSwitcherView(BrowserWindowInterface* browser)
 +      : browser_(browser),
-+        controller_(workspaces::WorkspaceController::From(browser)),
-+        menu_(controller_) {
++        controller_(workspaces::WorkspaceController::From(browser)) {
 +    CHECK(controller_);
 +    SetOrientation(views::LayoutOrientation::kHorizontal);
 +    SetCrossAxisAlignment(views::LayoutAlignment::kCenter);
@@ -594,7 +833,7 @@ index 000000000..1b2326d46
 +    auto add_button = std::make_unique<WorkspaceChipButton>(
 +        base::BindRepeating(&WorkspaceSwitcherView::CreateNewWorkspace,
 +                            base::Unretained(this)),
-+        u"+", std::string());
++        u"+");
 +    add_button->SetTooltipText(new_workspace_label);
 +    add_button->GetViewAccessibility().SetName(new_workspace_label);
 +    add_button_ = AddChildView(std::move(add_button));
@@ -624,19 +863,6 @@ index 000000000..1b2326d46
 +  }
 +
 + private:
-+  // views::ContextMenuController:
-+  void ShowContextMenuForViewImpl(
-+      views::View* source,
-+      const gfx::Point& point,
-+      ui::mojom::MenuSourceType source_type) override {
-+    auto* chip = views::AsViewClass<WorkspaceChipButton>(source);
-+    if (!chip || chip->workspace_id().empty()) {
-+      return;
-+    }
-+    menu_.Show(chip, chip->workspace_id(), gfx::Rect(point, gfx::Size()),
-+               views::MenuAnchorPosition::kTopLeft, source_type);
-+  }
-+
 +  void OnCollapseChanged(tabs::VerticalTabStripCollapseState state) {
 +    ScheduleRebuild();
 +  }
@@ -653,9 +879,6 @@ index 000000000..1b2326d46
 +
 +  void Rebuild() {
 +    rebuild_scheduled_ = false;
-+    if (menu_.IsRunning()) {
-+      return;
-+    }
 +    const bool collapsed = IsCollapsed(browser_);
 +    chips_->RemoveAllChildViews();
 +    add_button_->SetVisible(!collapsed);
@@ -674,11 +897,10 @@ index 000000000..1b2326d46
 +      auto chip = std::make_unique<WorkspaceChipButton>(
 +          base::BindRepeating(&WorkspaceSwitcherView::ActivateWorkspace,
 +                              base::Unretained(this), workspace.id),
-+          IconText(workspace), workspace.id);
++          IconText(workspace));
 +      chip->SetTooltipText(workspace.name);
 +      chip->GetViewAccessibility().SetName(l10n_util::GetStringFUTF16(
 +          IDS_WORKSPACE_ITEM_ACCNAME, workspace.name));
-+      chip->set_context_menu_controller(this);
 +      if (provider) {
 +        const SkColor color = WorkspaceColor(provider, workspace.color);
 +        const SkColor text = provider->GetColor(ui::kColorLabelForeground);
@@ -703,7 +925,6 @@ index 000000000..1b2326d46
 +
 +  const raw_ptr<BrowserWindowInterface> browser_;
 +  const raw_ptr<workspaces::WorkspaceController> controller_;
-+  WorkspaceMenu menu_;
 +  raw_ptr<views::FlexLayoutView> chips_ = nullptr;
 +  raw_ptr<views::LabelButton> add_button_ = nullptr;
 +  base::CallbackListSubscription collapse_changed_subscription_;
@@ -717,8 +938,8 @@ index 000000000..1b2326d46
 +BEGIN_METADATA(WorkspaceSwitcherView)
 +END_METADATA
 +
-+// Icon and name of the active workspace, shown above its tabs. Clicking it
-+// opens the workspace menu.
++// Icon and name of the active workspace, shown above its tabs. Clicking the
++// icon opens the icon picker, clicking elsewhere opens the workspace menu.
 +class WorkspaceHeaderView : public views::Button,
 +                            public workspaces::WorkspaceController::Observer,
 +                            public views::ContextMenuController {
@@ -740,10 +961,13 @@ index 000000000..1b2326d46
 +                                                  kCornerRadius);
 +    set_context_menu_controller(this);
 +
-+    icon_ = AddChildView(std::make_unique<views::Label>());
-+    icon_->SetCanProcessEventsWithinSubtree(false);
-+    icon_->SetSubpixelRenderingEnabled(false);
-+    icon_->SetProperty(views::kMarginsKey, gfx::Insets::TLBR(0, 0, 0, 8));
++    icon_ = AddChildView(std::make_unique<WorkspaceChipButton>(
++        base::BindRepeating(&WorkspaceHeaderView::OnIconPressed,
++                            base::Unretained(this)),
++        std::u16string()));
++    icon_->set_context_menu_controller(this);
++    icon_->SetTooltipText(l10n_util::GetStringUTF16(IDS_WORKSPACE_ICON_LABEL));
++    icon_->SetProperty(views::kMarginsKey, gfx::Insets::TLBR(0, -6, 0, 2));
 +
 +    name_ = AddChildView(std::make_unique<views::Label>());
 +    name_->SetCanProcessEventsWithinSubtree(false);
@@ -799,6 +1023,27 @@ index 000000000..1b2326d46
 +             ui::mojom::MenuSourceType::kMouse);
 +  }
 +
++  void OnIconPressed() {
++    if (const workspaces::Workspace* active =
++            controller_->GetActiveWorkspace()) {
++      ShowIconPicker(icon_, base::BindOnce(&WorkspaceHeaderView::SetIcon,
++                                           weak_factory_.GetWeakPtr(),
++                                           active->id));
++    }
++  }
++
++  void SetIcon(const std::string& id, const std::u16string& icon) {
++    const auto& workspaces = controller_->GetWorkspaces();
++    const auto it =
++        std::ranges::find(workspaces, id, &workspaces::Workspace::id);
++    if (it == workspaces.end()) {
++      return;
++    }
++    workspaces::Workspace workspace = *it;
++    workspace.icon = icon;
++    controller_->UpdateWorkspace(workspace);
++  }
++
 +  void ShowMenu(const gfx::Rect& bounds,
 +                views::MenuAnchorPosition position,
 +                ui::mojom::MenuSourceType source_type) {
@@ -832,7 +1077,7 @@ index 000000000..1b2326d46
 +      const SkColor color = WorkspaceColor(provider, active->color);
 +      SetBackground(views::CreateRoundedRectBackground(
 +          SkColorSetA(color, kHeaderAlpha), kCornerRadius));
-+      icon_->SetEnabledColor(color);
++      icon_->SetEnabledTextColors(color);
 +      name_->SetEnabledColor(provider->GetColor(ui::kColorLabelForeground));
 +    }
 +  }
@@ -840,12 +1085,13 @@ index 000000000..1b2326d46
 +  const raw_ptr<BrowserWindowInterface> browser_;
 +  const raw_ptr<workspaces::WorkspaceController> controller_;
 +  WorkspaceMenu menu_;
-+  raw_ptr<views::Label> icon_ = nullptr;
++  raw_ptr<views::LabelButton> icon_ = nullptr;
 +  raw_ptr<views::Label> name_ = nullptr;
 +  base::CallbackListSubscription collapse_changed_subscription_;
 +  base::ScopedObservation<workspaces::WorkspaceController,
 +                          workspaces::WorkspaceController::Observer>
 +      controller_observation_{this};
++  base::WeakPtrFactory<WorkspaceHeaderView> weak_factory_{this};
 +};
 +
 +BEGIN_METADATA(WorkspaceHeaderView)
