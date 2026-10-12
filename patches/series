@@ -8,4 +8,3 @@ helium/linux/use-default-theme.patch
 helium/linux/add-middle-click-paste-flag.patch
 helium/linux/add-error-for-missing-desktop-file.patch
 helium/linux/disable-tab-strokes.patch
-helium-ws/argon-branding.patch

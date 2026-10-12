@@ -6,4 +6,3 @@
 *.AppImage
 *.AppImage.zsync
 *.log
-/resources/generated/
